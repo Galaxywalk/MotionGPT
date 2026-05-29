@@ -2,6 +2,7 @@ import os
 import glob
 import torch
 import pytorch_lightning as pl
+from pytorch_lightning.strategies import DDPStrategy
 from omegaconf import OmegaConf
 from mGPT.callback import build_callbacks
 from mGPT.config import parse_args, instantiate_from_config
@@ -23,11 +24,14 @@ def main():
 
     # Environment Variables
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    if cfg.TRAIN.get("MATMUL_PRECISION", None):
+        torch.set_float32_matmul_precision(cfg.TRAIN.MATMUL_PRECISION)
 
     # Metric Logger
     pl_loggers = []
     for loggerName in cfg.LOGGER.TYPE:
-        if loggerName == 'tenosrboard' or cfg.LOGGER.WANDB.params.project:
+        if loggerName == 'tensorboard' or (
+                loggerName == 'wandb' and cfg.LOGGER.WANDB.params.project):
             pl_logger = instantiate_from_config(
                 eval(f'cfg.LOGGER.{loggerName.upper()}'))
             pl_loggers.append(pl_logger)
@@ -45,21 +49,27 @@ def main():
     model = build_model(cfg, datamodule)
     logger.info("model {} loaded".format(cfg.model.target))
 
+    strategy = 'auto'
+    if len(cfg.DEVICE) > 1:
+        strategy = DDPStrategy(
+            find_unused_parameters=cfg.TRAIN.get(
+                "DDP_FIND_UNUSED_PARAMETERS", False))
+
     # Lightning Trainer
     trainer = pl.Trainer(
         default_root_dir=cfg.FOLDER_EXP,
         max_epochs=cfg.TRAIN.END_EPOCH,
-        # precision='16',
+        precision=cfg.TRAIN.get("PRECISION", 32),
         logger=pl_loggers,
         callbacks=callbacks,
         check_val_every_n_epoch=cfg.LOGGER.VAL_EVERY_STEPS,
         accelerator=cfg.ACCELERATOR,
         devices=cfg.DEVICE,
         num_nodes=cfg.NUM_NODES,
-        strategy="ddp_find_unused_parameters_true"
-        if len(cfg.DEVICE) > 1 else 'auto',
-        benchmark=False,
-        deterministic=False,
+        strategy=strategy,
+        benchmark=cfg.TRAIN.get("BENCHMARK", False),
+        deterministic=cfg.TRAIN.get("DETERMINISTIC", False),
+        accumulate_grad_batches=cfg.TRAIN.get("ACCUMULATE_GRAD_BATCHES", 1),
     )
     logger.info("Trainer initialized")
 

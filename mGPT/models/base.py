@@ -126,8 +126,9 @@ class BaseModel(LightningModule):
         optim_target = self.hparams.cfg.TRAIN.OPTIM.target
         if len(optim_target.split('.')) == 1:
             optim_target = 'torch.optim.' + optim_target
+        trainable_params = (p for p in self.parameters() if p.requires_grad)
         optimizer = get_obj_from_str(optim_target)(
-            params=self.parameters(), **self.hparams.cfg.TRAIN.OPTIM.params)
+            params=trainable_params, **self.hparams.cfg.TRAIN.OPTIM.params)
 
         # Scheduler
         scheduler_target = self.hparams.cfg.TRAIN.LR_SCHEDULER.target

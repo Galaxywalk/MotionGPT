@@ -40,12 +40,12 @@ class MotionGPT(BaseModel):
         if motion_vae != None:
             self.vae = instantiate_from_config(motion_vae)
 
-        # Instantiate motion-language model
-        self.lm = instantiate_from_config(lm)
+        # Instantiate the motion-language model only for LM stages.
+        self.lm = instantiate_from_config(lm) if 'lm' in self.hparams.stage else None
 
         # Freeze the motion tokenizer for lm training
         if 'lm' in self.hparams.stage:
-            self.vae.training = False
+            self.vae.eval()
             for p in self.vae.parameters():
                 p.requires_grad = False
 
@@ -62,7 +62,28 @@ class MotionGPT(BaseModel):
         self.codePred = []
         self.codeFrequency = torch.zeros((self.hparams.codebook_size, ))
 
+    def load_state_dict(self, state_dict, strict=True):
+        if self.lm is None:
+            state_dict = {
+                key: value
+                for key, value in state_dict.items()
+                if not key.startswith("lm.")
+            }
+        return super().load_state_dict(state_dict, strict=strict)
+
+    def train(self, mode=True):
+        super().train(mode)
+        if mode and 'lm' in self.hparams.stage and hasattr(self, "vae"):
+            self.vae.eval()
+        return self
+
     def forward(self, batch, task="t2m"):
+        if self.lm is None:
+            raise RuntimeError(
+                f"Motion-language model is not initialized for stage "
+                f"{self.hparams.stage}."
+            )
+
         texts = batch["text"]
         lengths_ref = batch["length"]
 
@@ -302,16 +323,12 @@ class MotionGPT(BaseModel):
     def train_vae_forward(self, batch):
         # batch detach
         feats_ref = batch["motion"]
-        joints_ref = self.feats2joints(feats_ref)
         # motion encode & decode
         feats_rst, loss_commit, perplexity = self.vae(feats_ref)
-        joints_rst = self.feats2joints(feats_rst)
         # return set
         rs_set = {
             "m_ref": feats_ref,
-            "joints_ref": joints_ref,
             "m_rst": feats_rst,
-            "joints_rst": joints_rst,
             "loss_commit": loss_commit,
             "perplexity": perplexity,
         }
@@ -337,8 +354,6 @@ class MotionGPT(BaseModel):
                 continue
             feats_pred, _, _ = self.vae(feats_ref[i:i + 1, :lengths[i]])
             feats_rst[i:i + 1, :feats_pred.shape[1], :] = feats_pred
-
-            code_pred, _ = self.vae.encode(feats_ref[i:i + 1, :lengths[i]])
 
             # codeFre_pred = torch.bincount(code_pred[0],
             #                               minlength=self.hparams.codebook_size).to(

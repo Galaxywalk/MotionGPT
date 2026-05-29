@@ -14,6 +14,26 @@ class BASEDataModule(pl.LightningDataModule):
         self._val_dataset = None
         self._test_dataset = None
 
+    def _make_dataloader(self, dataset, split_cfg, shuffle=False, batch_size=None):
+        dataloader_options = self.dataloader_options.copy()
+        dataloader_options["batch_size"] = batch_size or split_cfg.BATCH_SIZE
+        dataloader_options["num_workers"] = split_cfg.NUM_WORKERS
+        dataloader_options["shuffle"] = shuffle
+        dataloader_options["pin_memory"] = split_cfg.get("PIN_MEMORY", False)
+        dataloader_options["drop_last"] = split_cfg.get("DROP_LAST", False)
+
+        num_workers = dataloader_options["num_workers"]
+        if num_workers > 0:
+            dataloader_options["persistent_workers"] = split_cfg.get(
+                "PERSISTENT_WORKERS", True)
+            prefetch_factor = split_cfg.get("PREFETCH_FACTOR", None)
+            if prefetch_factor is not None:
+                dataloader_options["prefetch_factor"] = prefetch_factor
+        else:
+            dataloader_options["persistent_workers"] = False
+
+        return DataLoader(dataset, **dataloader_options)
+
     def get_sample_set(self, overrides={}):
         sample_params = self.hparams.copy()
         sample_params.update(overrides)
@@ -55,49 +75,33 @@ class BASEDataModule(pl.LightningDataModule):
             _ = self.test_dataset
 
     def train_dataloader(self):
-        dataloader_options = self.dataloader_options.copy()
-        dataloader_options["batch_size"] = self.cfg.TRAIN.BATCH_SIZE
-        dataloader_options["num_workers"] = self.cfg.TRAIN.NUM_WORKERS
-        return DataLoader(
+        return self._make_dataloader(
             self.train_dataset,
-            shuffle=False,
-            persistent_workers=True,
-            **dataloader_options,
+            self.cfg.TRAIN,
+            shuffle=self.cfg.TRAIN.get("SHUFFLE", True),
         )
 
     def predict_dataloader(self):
-        dataloader_options = self.dataloader_options.copy()
-        dataloader_options[
-            "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
-        dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
-        dataloader_options["shuffle"] = False
-        return DataLoader(
+        return self._make_dataloader(
             self.test_dataset,
-            persistent_workers=True,
-            **dataloader_options,
+            self.cfg.TEST,
+            shuffle=False,
+            batch_size=1 if self.is_mm else self.cfg.TEST.BATCH_SIZE,
         )
 
     def val_dataloader(self):
         # overrides batch_size and num_workers
-        dataloader_options = self.dataloader_options.copy()
-        dataloader_options["batch_size"] = self.cfg.EVAL.BATCH_SIZE
-        dataloader_options["num_workers"] = self.cfg.EVAL.NUM_WORKERS
-        dataloader_options["shuffle"] = False
-        return DataLoader(
+        return self._make_dataloader(
             self.val_dataset,
-            persistent_workers=True,
-            **dataloader_options,
+            self.cfg.EVAL,
+            shuffle=False,
         )
 
     def test_dataloader(self):
         # overrides batch_size and num_workers
-        dataloader_options = self.dataloader_options.copy()
-        dataloader_options[
-            "batch_size"] = 1 if self.is_mm else self.cfg.TEST.BATCH_SIZE
-        dataloader_options["num_workers"] = self.cfg.TEST.NUM_WORKERS
-        dataloader_options["shuffle"] = False
-        return DataLoader(
+        return self._make_dataloader(
             self.test_dataset,
-            persistent_workers=True,
-            **dataloader_options,
+            self.cfg.TEST,
+            shuffle=False,
+            batch_size=1 if self.is_mm else self.cfg.TEST.BATCH_SIZE,
         )

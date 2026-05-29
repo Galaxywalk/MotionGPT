@@ -13,7 +13,6 @@ def main():
     # parse options
     cfg = parse_args(phase="test")  # parse config file
     cfg.TRAIN.STAGE = "token"
-    cfg.TRAIN.BATCH_SIZE = 1
 
     # set seed
     pl.seed_everything(cfg.SEED_VALUE)
@@ -37,27 +36,32 @@ def main():
     print("model loaded")
 
     # Strict load vae model
-    assert cfg.TRAIN.PRETRAINED_VAE is not None
+    assert cfg.TRAIN.PRETRAINED_VAE
     load_pretrained_vae(cfg, model)
 
-    if cfg.ACCELERATOR == "gpu":
-        model = model.to('cuda')
+    device = torch.device("cuda" if cfg.ACCELERATOR == "gpu"
+                          and torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
 
-    for batch in tqdm(datasets.train_dataloader(),
-                      desc=f'motion tokenize'):
-        name = batch['text']
-        
-        pose = batch['motion']
-        pose = pose.cuda().float()
+    with torch.no_grad():
+        for batch in tqdm(datasets.train_dataloader(),
+                          desc=f'motion tokenize'):
+            names = batch['text']
+            poses = batch['motion'].to(device).float()
+            lengths = batch['length']
 
-        if pose.shape[1] == 0:
-            continue
-        target, _ = model.vae.encode(pose)
-        target = target.to('cpu').numpy()
+            for i, name in enumerate(names):
+                if lengths[i] == 0:
+                    continue
 
-        target_path = os.path.join(output_dir, name[0] + '.npy')
-        Path(target_path).parent.mkdir(parents=True, exist_ok=True)
-        np.save(target_path, target)
+                pose = poses[i:i + 1, :lengths[i]]
+                target, _ = model.vae.encode(pose)
+                target = target.to('cpu').numpy()
+
+                target_path = os.path.join(output_dir, name + '.npy')
+                Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+                np.save(target_path, target)
 
     print(
         f'Motion tokenization done, the motion tokens are saved to {output_dir}'
