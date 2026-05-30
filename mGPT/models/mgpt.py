@@ -3,6 +3,7 @@ import os
 import random
 import torch
 import time
+from mGPT.archs.root_correction import RootCorrectionHead
 from mGPT.config import instantiate_from_config
 from mGPT.data.humanml.scripts.motion_process import recover_root_rot_pos
 from os.path import join as pjoin
@@ -41,6 +42,7 @@ class MotionGPT(BaseModel):
         if motion_vae != None:
             self.vae = instantiate_from_config(motion_vae)
         self._configure_root_velocity_calibration(cfg)
+        self._configure_root_correction_head(cfg)
 
         # Instantiate the motion-language model only for LM stages.
         self.lm = instantiate_from_config(lm) if 'lm' in self.hparams.stage else None
@@ -68,6 +70,7 @@ class MotionGPT(BaseModel):
         calib_cfg = cfg.get("ROOT_VEL_CALIB", {})
         self.root_velocity_calib_enabled = bool(calib_cfg.get("ENABLED", False))
         self.root_velocity_calib_domain = str(calib_cfg.get("DOMAIN", "m4human"))
+        self.root_velocity_calib_freeze_vae = bool(calib_cfg.get("FREEZE_VAE", False))
         if not self.root_velocity_calib_enabled:
             return
 
@@ -90,7 +93,28 @@ class MotionGPT(BaseModel):
         if bool(calib_cfg.get("AFFINE", False)):
             self.root_velocity_bias = torch.nn.Parameter(torch.zeros(2, dtype=torch.float32))
 
-        if bool(calib_cfg.get("FREEZE_VAE", False)) and hasattr(self, "vae"):
+        if self.root_velocity_calib_freeze_vae and hasattr(self, "vae"):
+            self.vae.eval()
+            for param in self.vae.parameters():
+                param.requires_grad = False
+
+    def _configure_root_correction_head(self, cfg):
+        head_cfg = cfg.get("ROOT_CORRECTION_HEAD", {})
+        self.root_correction_enabled = bool(head_cfg.get("ENABLED", False))
+        self.root_correction_domain = str(head_cfg.get("DOMAIN", "m4human"))
+        self.root_correction_freeze_vae = bool(head_cfg.get("FREEZE_VAE", False))
+        if not self.root_correction_enabled:
+            return
+
+        self.root_correction_head = RootCorrectionHead(
+            nfeats=int(self.hparams.cfg.DATASET.NFEATS),
+            hidden_dims=head_cfg.get("HIDDEN_DIMS", [256, 128]),
+            kernel_size=int(head_cfg.get("KERNEL_SIZE", 3)),
+            output_dim=3,
+            zero_init=bool(head_cfg.get("ZERO_INIT", True)),
+        )
+
+        if self.root_correction_freeze_vae and hasattr(self, "vae"):
             self.vae.eval()
             for param in self.vae.parameters():
                 param.requires_grad = False
@@ -137,6 +161,35 @@ class MotionGPT(BaseModel):
             calibrated[mask, :, 1:3] = calibrated[mask, :, 1:3] * scale + bias
         return calibrated
 
+    def _root_correction_domain_mask(self, batch, device, batch_size):
+        domain = getattr(self, "root_correction_domain", "m4human")
+        if domain in ("all", "*"):
+            return None
+        if batch is None or "domain" not in batch:
+            return torch.zeros(batch_size, device=device, dtype=torch.bool)
+        return torch.tensor(
+            [item == domain for item in batch["domain"]],
+            device=device,
+            dtype=torch.bool,
+        )
+
+    def _apply_root_correction(self, feats, batch=None):
+        if not getattr(self, "root_correction_enabled", False):
+            return feats
+        if not hasattr(self, "root_correction_head"):
+            return feats
+        mask = self._root_correction_domain_mask(batch, feats.device, feats.shape[0])
+        if mask is not None and not bool(mask.any()):
+            return feats
+
+        delta = self.root_correction_head(feats)
+        corrected = feats.clone()
+        if mask is None:
+            corrected[..., :3] = corrected[..., :3] + delta
+        else:
+            corrected[mask, :, :3] = corrected[mask, :, :3] + delta[mask]
+        return corrected
+
     def load_state_dict(self, state_dict, strict=True):
         if self.lm is None:
             state_dict = {
@@ -148,7 +201,12 @@ class MotionGPT(BaseModel):
 
     def train(self, mode=True):
         super().train(mode)
-        if mode and 'lm' in self.hparams.stage and hasattr(self, "vae"):
+        freeze_vae = (
+            'lm' in self.hparams.stage or
+            getattr(self, "root_velocity_calib_freeze_vae", False) or
+            getattr(self, "root_correction_freeze_vae", False)
+        )
+        if mode and freeze_vae and hasattr(self, "vae"):
             self.vae.eval()
         return self
 
@@ -401,6 +459,7 @@ class MotionGPT(BaseModel):
         # motion encode & decode
         feats_rst, loss_commit, perplexity = self.vae(feats_ref)
         feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
+        feats_rst = self._apply_root_correction(feats_rst, batch)
         feats_ref_denorm = self.datamodule.denormalize(feats_ref)
         feats_rst_denorm = self.datamodule.denormalize(feats_rst)
         _, root_ref = recover_root_rot_pos(feats_ref_denorm)
@@ -409,6 +468,8 @@ class MotionGPT(BaseModel):
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
+            "m_ref_denorm": feats_ref_denorm,
+            "m_rst_denorm": feats_rst_denorm,
             "root_ref": root_ref,
             "root_rst": root_rst,
             "domain": batch.get("domain"),
@@ -447,6 +508,7 @@ class MotionGPT(BaseModel):
         # np.save('../memData/results/codeFrequency.npy',
         #         self.codeFrequency.cpu().numpy())
         feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
+        feats_rst = self._apply_root_correction(feats_rst, batch)
 
         # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)

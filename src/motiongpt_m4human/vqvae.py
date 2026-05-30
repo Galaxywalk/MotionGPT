@@ -11,6 +11,7 @@ import numpy as np
 from numpy.core.multiarray import _reconstruct as numpy_reconstruct
 import torch
 
+from mGPT.archs.root_correction import RootCorrectionHead
 from mGPT.archs.mgpt_vq import VQVae
 
 
@@ -62,6 +63,29 @@ class RootVelocityCalibratedVQVae(torch.nn.Module):
 
     def decode(self, *args, **kwargs):
         return self._apply_calibration(self.vae.decode(*args, **kwargs))
+
+
+class RootCorrectedVQVae(torch.nn.Module):
+    def __init__(self, vae: torch.nn.Module, head: RootCorrectionHead) -> None:
+        super().__init__()
+        self.vae = vae
+        self.root_correction_head = head
+
+    def _apply_correction(self, feats: torch.Tensor) -> torch.Tensor:
+        delta = self.root_correction_head(feats)
+        feats = feats.clone()
+        feats[..., :3] = feats[..., :3] + delta
+        return feats
+
+    def forward(self, *args, **kwargs):
+        feats, loss_commit, perplexity = self.vae(*args, **kwargs)
+        return self._apply_correction(feats), loss_commit, perplexity
+
+    def encode(self, *args, **kwargs):
+        return self.vae.encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._apply_correction(self.vae.decode(*args, **kwargs))
 
 
 def numpy_core_reconstruct(*args, **kwargs):
@@ -273,6 +297,9 @@ def load_vqvae(
     calibration_meta: dict[str, Any] = {
         "root_velocity_calibration_domain": calibration_domain,
         "root_velocity_calibration_applied": False,
+        "root_correction_domain": calibration_domain,
+        "root_correction_available": False,
+        "root_correction_applied": False,
     }
     scale_logit = state.get("root_velocity_scale_logit")
     if scale_logit is not None:
@@ -294,6 +321,30 @@ def load_vqvae(
             ).to(device)
             model.eval()
             calibration_meta["root_velocity_calibration_applied"] = True
+    head_state = {
+        key.replace("root_correction_head.", ""): value
+        for key, value in state.items()
+        if key.startswith("root_correction_head.")
+    }
+    if head_state:
+        head = RootCorrectionHead(
+            nfeats=263,
+            hidden_dims=[256, 128],
+            kernel_size=3,
+            output_dim=3,
+            zero_init=False,
+        )
+        missing, unexpected = head.load_state_dict(head_state, strict=True)
+        if missing or unexpected:
+            raise RuntimeError(
+                "Checkpoint root correction head does not match: "
+                f"missing={missing[:8]}, unexpected={unexpected[:8]}"
+            )
+        calibration_meta["root_correction_available"] = True
+        if calibration_domain in ("m4human", "all", "*"):
+            model = RootCorrectedVQVae(model, head.to(device)).to(device)
+            model.eval()
+            calibration_meta["root_correction_applied"] = True
     return model, {
         "checkpoint": str(checkpoint_path),
         "epoch": checkpoint.get("epoch"),

@@ -199,3 +199,76 @@ root drift by replacing only the decoded root yaw velocity feature
 - The next structural direction should focus on the root local velocity branch,
   with a secondary yaw/heading consistency term. More global path-length losses
   are unlikely to solve the main issue.
+
+## Root Correction Head
+
+This implements a minimal structural patch on top of Exp3. The VQ-VAE encoder,
+codebook, and decoder are frozen. A small temporal Conv1d head reads the decoded
+263-D feature and predicts residual corrections to root yaw velocity and local
+x/z velocity. The correction is applied only for `m4human` domain samples.
+
+Config:
+`configs/config_h3d_m4human_mix70_multilen_rootcorr_stage1.yaml`
+
+### Checkpoint and Outputs
+
+- Checkpoint:
+  `experiments/mgpt/VQVAE_HumanML3D_M4Human20Hz_mix70_lr1e4_multilen_rootcorr_finetune/checkpoints/epoch=49.ckpt`
+- Eval directory:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/rootcorr_epoch49`
+
+### Training Setup
+
+- Init: Exp3 epoch649
+- Frozen: VQ encoder, codebook, decoder body
+- Trainable: `RootCorrectionHead`, 301K parameters
+- Data: HumanML3D + M4Human mix70, multi-length `[64, 128, 196]`
+- Domain: correction and root losses apply only to M4Human
+- Loss weights:
+  `root_vel=0.05`, `root_yaw=0.01`, `final=0.02`, `path=0.005`
+- LR: `1e-4`
+- Epochs: 50
+
+### Results
+
+| experiment | M4Human test 196 MPJPE / root-align / gap | root xz mean | final xz | speed bias | path error | HumanML3D official FID / MPJPE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Exp3 path/final | 101.077 / 52.429 / 48.648 mm | 76.054 mm | 118.717 mm | -7.202 mm/s | -0.0673 m | 0.182322 / 48.643 mm |
+| Root correction head | 100.340 / 52.410 / 47.929 mm | 75.203 mm | 116.994 mm | -8.261 mm/s | -0.0767 m | 0.182322 / 48.643 mm |
+
+Length breakdown:
+
+| split/window | MPJPE / root-align / gap |
+| --- | ---: |
+| test 64 | 71.761 / 50.759 / 21.002 mm |
+| test 128 | 87.337 / 51.532 / 35.805 mm |
+| test 196 | 100.340 / 52.410 / 47.929 mm |
+| all 196 | 68.615 / 31.938 / 36.677 mm |
+
+Oracle after correction:
+
+| case | MPJPE / root-align / gap | root xz mean | final xz |
+| --- | ---: | ---: | ---: |
+| Case 0 pred yaw + pred vel | 100.340 / 52.410 / 47.929 mm | 75.203 mm | 116.994 mm |
+| Case 1 GT yaw + pred vel | 90.758 / 50.423 / 40.334 mm | 66.129 mm | 101.043 mm |
+| Case 2 pred yaw + GT vel | 70.367 / 52.410 / 17.956 mm | 26.393 mm | 43.713 mm |
+| Case 3 GT yaw + GT vel | 52.559 / 50.423 / 2.135 mm | 0.000 mm | 0.000 mm |
+
+### Interpretation
+
+- The implementation is safe: HumanML3D official metrics are unchanged from
+  Exp3 because correction is gated to M4Human.
+- The head-only correction is only a weak positive result. M4Human test-196
+  improves by 0.74 mm full MPJPE and 0.72 mm gap, far below the 80-90 mm target.
+- The correction did not fix the velocity bottleneck: speed bias worsened from
+  -7.20 to -8.26 mm/s, and the oracle still shows the same dominant local
+  velocity gap.
+- The most likely reason is that a zero-init head trained with losses measured
+  in meters receives a weak correction signal relative to the frozen decoder's
+  reconstruction balance. This version validates the wiring and domain gating,
+  but not the efficacy of the head.
+
+Next options are either to increase the root-velocity objective in physical
+units, for example by training on mm/s-scaled velocity loss, or to unfreeze the
+decoder tail/root-specific layers so the correction is not fighting a frozen
+decoder output alone.
