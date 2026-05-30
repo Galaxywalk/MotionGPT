@@ -15,7 +15,7 @@ drift.
 
 ## Current Best Checkpoint
 
-The current best factorized setup is:
+The current best factorized setup is the full from-scratch R3 recipe:
 
 ```text
 local branch: frozen local-only VQ
@@ -25,9 +25,9 @@ root branch:  R3 no-skip bottleneck TCN, 2x root latent rate, multiscale loss
 Artifacts:
 
 - Local VQ:
-  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt`
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1/checkpoints/best.pt`
 - Best root branch R3:
-  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_tcn_multiscale_ds1_v1/checkpoints/best.pt`
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_scratch_full_r3_v1/checkpoints/best.pt`
 - Factorized cache:
   `/cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz`
 
@@ -37,6 +37,7 @@ Code:
 - `src/motiongpt_m4human/factorized/root_branch.py`
 - `src/motiongpt_m4human/factorized/cache.py`
 - `src/motiongpt_m4human/factorized/representation.py`
+- `scripts/train_factorized_scratch_m4human.sh`
 
 ## Representation
 
@@ -184,16 +185,17 @@ fps       = 20 Hz
 
 The local VQ is trained on M4Human local features only.
 
-Command used:
+Full from-scratch command:
 
 ```bash
 PYTHONPATH=src:. CUDA_VISIBLE_DEVICES=5 \
 /cpfs01/liangbo/data/conda_envs/mgpt/bin/python \
   -m motiongpt_m4human.factorized.local_vq train \
   --cache-root /cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz \
-  --exp-root /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1 \
-  --epochs 100 \
-  --steps-per-epoch 100 \
+  --exp-root /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1 \
+  --seed 20260531 \
+  --epochs 200 \
+  --steps-per-epoch 200 \
   --batch-size 256 \
   --window-sizes 64 128 196 \
   --window-weights 0.25 0.25 0.5 \
@@ -215,10 +217,10 @@ VQ commit loss
 
 The local VQ is frozen. Only the root branch is trained.
 
-Best R3 command:
+Best full from-scratch R3 command:
 
 ```bash
-PYTHONPATH=src:. CUDA_VISIBLE_DEVICES=7 \
+PYTHONPATH=src:. CUDA_VISIBLE_DEVICES=6 \
 /cpfs01/liangbo/data/conda_envs/mgpt/bin/python \
   -m motiongpt_m4human.factorized.root_branch train \
   --architecture bottleneck_tcn \
@@ -228,10 +230,11 @@ PYTHONPATH=src:. CUDA_VISIBLE_DEVICES=7 \
   --tcn-depth 4 \
   --lambda-multiscale 20.0 \
   --cache-root /cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz \
-  --local-vq-checkpoint /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt \
-  --exp-root /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_tcn_multiscale_ds1_v1 \
-  --epochs 50 \
-  --steps-per-epoch 100 \
+  --local-vq-checkpoint /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1/checkpoints/best.pt \
+  --exp-root /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_scratch_full_r3_v1 \
+  --seed 20260531 \
+  --epochs 120 \
+  --steps-per-epoch 200 \
   --batch-size 256 \
   --window-sizes 64 128 196 \
   --window-weights 0.25 0.25 0.5 \
@@ -262,14 +265,20 @@ root drift mode.
 
 ### Local VQ
 
-M4Human test196:
+Full from-scratch local VQ, M4Human test196:
 
 ```text
-MPJPE / root-aligned MPJPE: 51.168 / 51.168 mm
-unique codes:               512 / 512
-effective code count:       356
+MPJPE / root-aligned MPJPE: 53.562 / 53.562 mm
+unique codes:               511 / 512
+effective code count:       359
 tokens per 196-frame clip:  46.99
+contact F1:                 0.994
 ```
+
+The earlier shorter local VQ run reached a better local-only test196 MPJPE
+(`51.168 mm`). The full scratch recipe is still the current best end-to-end
+factorized reconstruction because its root branch is trained longer and reduces
+global trajectory error more strongly.
 
 ### Root Branch
 
@@ -282,15 +291,25 @@ M4Human test196 comparison:
 | R1 stronger TCN | 63.412 / 48.570 / 14.843 mm |
 | R2 TCN + multiscale displacement | 56.663 / 48.304 / 8.360 mm |
 | R3 TCN + multiscale + 2x root latent rate | 55.171 / 48.243 / 6.928 mm |
+| full from-scratch R3 | 54.696 / 49.605 / 5.091 mm |
 
-R3 root metrics on M4Human test196:
+Full from-scratch R3 root metrics on M4Human test196:
 
 ```text
-root_xz_mean_error: 10.981 mm
-final_xz_error:     15.198 mm
-path_error:        -0.0002 m
-speed_bias:        -0.023 mm/s
+root_xz_mean_error: 2.908 mm
+final_xz_error:     4.347 mm
+path_error:        -0.0004 m
+speed_bias:        -0.039 mm/s
 ```
+
+Length breakdown:
+
+| split/window | MPJPE / root-align / gap | root xz mean | final xz | speed bias |
+| --- | ---: | ---: | ---: | ---: |
+| test 64 | 54.822 / 49.986 / 4.836 mm | 1.398 mm | 2.086 mm | 0.007 mm/s |
+| test 128 | 54.665 / 49.719 / 4.945 mm | 2.110 mm | 3.297 mm | -0.019 mm/s |
+| test 196 | 54.696 / 49.605 / 5.091 mm | 2.908 mm | 4.347 mm | -0.039 mm/s |
+| val 196 | 45.708 / 42.821 / 2.887 mm | 2.145 mm | 3.512 mm | 0.015 mm/s |
 
 ## Interpretation
 
@@ -309,8 +328,10 @@ global root motion -> continuous root latent
 The local tokens capture body pose well. The continuous root branch prevents
 small root velocity/yaw errors from accumulating into large 196-frame drift.
 
-R3 is currently the best M4Human reconstruction path in this repo. Its full
-MPJPE is close to the local reconstruction floor, and its root gap is small.
+The full from-scratch R3 is currently the best M4Human reconstruction path in
+this repo. Its root gap is about `5 mm` on 196-frame test windows, so remaining
+error is dominated by local reconstruction quality rather than accumulated root
+drift.
 
 ## Limitations
 

@@ -710,3 +710,114 @@ Recommended next steps:
 - Only after mixed-domain validation, consider root latent compression or
   discretization. The current continuous root branch should remain the quality
   reference.
+
+## Full From-Scratch Factorized R3 Recipe
+
+This pass trains the current factorized network from scratch with one fixed
+recipe. It does not reuse the previous local VQ or root branch checkpoints, and
+it does not mix HumanML3D.
+
+The only staged dependency is structural: the root branch needs a trained local
+VQ checkpoint for conditioning. The recipe is otherwise fixed upfront:
+
+```text
+Stage 1: train local VQ from random init
+Stage 2: freeze that local VQ, train no-skip R3 root TCN from random init
+Stage 3: run fixed 64/128/196 eval
+```
+
+The reproducible script is:
+
+```text
+scripts/train_factorized_scratch_m4human.sh
+```
+
+### Output Paths
+
+- Local VQ:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1`
+- Root branch:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_scratch_full_r3_v1`
+
+### Training Recipe
+
+Local VQ:
+
+```text
+data:             M4Human train only
+seed:             20260531
+epochs:           200
+steps/epoch:      200
+total steps:      40,000
+batch size:       256
+windows:          64 / 128 / 196
+window weights:   0.25 / 0.25 / 0.50
+lr:               2e-4 -> 1e-6 cosine
+```
+
+Root branch:
+
+```text
+data:             M4Human train only
+seed:             20260531
+architecture:     bottleneck_tcn
+width:            256
+latent_width:     256
+root downsample:  2x
+tcn_depth:        4
+multiscale loss:  20.0
+epochs:           120
+steps/epoch:      200
+total steps:      24,000
+batch size:       256
+windows:          64 / 128 / 196
+window weights:   0.25 / 0.25 / 0.50
+lr:               2e-4 -> 1e-6 cosine
+```
+
+### Local VQ Results
+
+| split/window | MPJPE / root-align | local body MPJPE | local velocity error | contact F1 | unique / effective codes | tokens/window |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| test 64 | 53.922 / 53.922 mm | 56.490 mm | 124.534 mm/s | 0.9940 | 511 / 365.3 | 15.92 |
+| test 128 | 53.683 / 53.683 mm | 56.239 mm | 121.953 mm/s | 0.9942 | 511 / 361.3 | 30.97 |
+| test 196 | 53.562 / 53.562 mm | 56.113 mm | 121.067 mm/s | 0.9943 | 511 / 358.7 | 46.99 |
+| val 196 | 44.953 / 44.953 mm | 47.094 mm | 99.205 mm/s | 0.9968 | 490 / 282.3 | 48.37 |
+
+The full-scratch local VQ is not better than the earlier shorter local VQ
+(`51.168 mm` on test196). It improves contact metrics but worsens local pose
+MPJPE by about `2.4 mm`. This means future final recipes should use validation
+or test-heldout local MPJPE for checkpoint selection, not only training loss.
+
+### Root Branch Results
+
+| checkpoint | split/window | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| best | test 64 | 54.822 / 49.986 / 4.836 mm | 1.398 mm | 2.086 mm | 0.0000 m | 0.007 mm/s |
+| best | test 128 | 54.665 / 49.719 / 4.945 mm | 2.110 mm | 3.297 mm | -0.0001 m | -0.019 mm/s |
+| best | test 196 | 54.696 / 49.605 / 5.091 mm | 2.908 mm | 4.347 mm | -0.0004 m | -0.039 mm/s |
+| best | val 196 | 45.708 / 42.821 / 2.887 mm | 2.145 mm | 3.512 mm | 0.0001 m | 0.015 mm/s |
+| last | test 196 | 54.679 / 49.611 / 5.068 mm | 2.796 mm | 4.170 mm | -0.0009 m | -0.101 mm/s |
+
+### Comparison
+
+| experiment | M4Human test196 MPJPE / root-align / gap | root xz mean | final xz |
+| --- | ---: | ---: | ---: |
+| Exp3 single-stream path/final | 101.077 / 52.429 / 48.648 mm | 76.054 mm | 118.717 mm |
+| earlier R3 ablation | 55.171 / 48.243 / 6.928 mm | 10.981 mm | 15.198 mm |
+| full scratch R3 best | 54.696 / 49.605 / 5.091 mm | 2.908 mm | 4.347 mm |
+| full scratch R3 last | 54.679 / 49.611 / 5.068 mm | 2.796 mm | 4.170 mm |
+
+### Interpretation
+
+- The full from-scratch recipe reproduces and slightly improves the previous
+  best full MPJPE, without any finetuning from previous checkpoints.
+- Root reconstruction is now very strong: test196 root xz mean error is only
+  `2.91 mm`, final xz error is `4.35 mm`, and speed bias is effectively zero.
+- The remaining full MPJPE is no longer root drift. It is dominated by local
+  VQ quality. The full-scratch local VQ is weaker than the earlier short local
+  VQ despite lower training loss, which is a useful negative finding.
+- The next quality lever is local VQ checkpoint selection and local VQ training
+  recipe, not root trajectory modeling. A practical next step is to add
+  validation-eval checkpointing to `local_vq.py` and select by test/val-style
+  root-aligned MPJPE rather than train loss.
