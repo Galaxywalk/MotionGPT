@@ -369,3 +369,96 @@ Oracle after tail + physical loss:
   local velocity from the current VQ latent. A cleaner next direction is a
   dedicated root-trajectory branch or a codebook/objective that preserves root
   local velocity before the VQ bottleneck.
+
+## Root/Local Factorized Tokenizer Phase 1-2
+
+This pass implements the first two concrete steps from
+`ROOT_LOCAL_TOKENIZER_TODO.md`:
+
+- `src/motiongpt_m4human/factorized/audit_root_quality.py`
+  audits physical root statistics, yaw jitter, root height, foot sliding,
+  smoothing impact, and VQ upper-bound decompositions.
+- `src/motiongpt_m4human/factorized/cache.py` builds a reusable root/local
+  factorized cache.
+- `src/motiongpt_m4human/factorized/representation.py`,
+  `recover.py`, and `dataset.py` provide conversion, round-trip recovery, and
+  multi-length window sampling.
+
+### Output Paths
+
+- Exp3 test-split root quality + upper bounds:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_audit/root_quality_exp3_test`
+- All-split root quality statistics:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_audit/root_quality_all_splits`
+- M4Human factorized cache:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz`
+
+### Root Quality Findings
+
+Test split:
+
+| source | sequences / windows | root speed p50 / mean | window196 path p50 / mean | yaw vel p95 / p99 | contact ratio | contact slide ratio | smoothing MPJPE mean / p50 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| HumanML3D test | 4384 / 4218 | 0.124 / 0.314 m/s | 1.396 / 2.208 m | 15.74 / 40.05 deg/s | 0.857 | 0.349 | 7.19 / 2.75 mm |
+| M4Human test | 238 / 1406 | 0.088 / 0.164 m/s | 1.180 / 1.529 m | 12.21 / 28.43 deg/s | 0.923 | 0.248 | 5.74 / 2.66 mm |
+
+All-split highlights:
+
+| source split | root speed p50 / mean | window196 path p50 / mean | contact slide ratio | smoothing MPJPE mean / p50 |
+| --- | ---: | ---: | ---: | ---: |
+| HumanML3D train | 0.128 / 0.316 m/s | 1.454 / 2.227 m | 0.353 | 7.42 / 2.70 mm |
+| HumanML3D val | 0.127 / 0.313 m/s | 1.357 / 2.241 m | 0.353 | 7.76 / 2.48 mm |
+| M4Human train | 0.089 / 0.168 m/s | 1.224 / 1.590 m | 0.253 | 5.94 / 2.27 mm |
+| M4Human val | 0.081 / 0.147 m/s | 1.231 / 1.411 m | 0.220 | 5.46 / 2.58 mm |
+| M4Human test | 0.088 / 0.164 m/s | 1.180 / 1.529 m | 0.248 | 5.74 / 2.66 mm |
+
+### Exp3 Upper Bounds
+
+| source/case | MPJPE / root-align / gap | final xz | path error |
+| --- | ---: | ---: | ---: |
+| M4Human normal pred root + pred local | 101.077 / 52.429 / 48.648 mm | 118.717 mm | -0.0673 m |
+| M4Human GT root + pred local | 52.075 / 52.075 / ~0 mm | 0.000 mm | 0.0000 m |
+| M4Human pred root + GT local | 78.626 / 18.181 / 60.445 mm | 118.717 mm | -0.0673 m |
+| M4Human smoothed GT root + pred local | 52.317 / 52.109 / 0.208 mm | 1.594 mm | -0.0143 m |
+| M4Human smoothed GT root + GT local | 1.531 / 0.783 / 0.747 mm | 1.594 mm | -0.0143 m |
+
+### Factorized Cache
+
+The M4Human cache contains:
+
+- sequences: `1081`
+- frames: `1,317,030`
+- disk size: `2.5G`
+- round-trip MPJPE mean: `1.46e-5 mm`
+- round-trip MPJPE max: `0.00042 mm`
+
+Stored fields include `local_joints`, `local_joint_vel`, `local_rot6d`,
+`contacts`, `root_xy`, `root_yaw`, `root_height`, `root_vel_local_mps`,
+`root_vel_global_mps`, `root_yaw_vel_radps`, `dt`, `source_domain`, and
+`valid_mask`. The cache keeps `axis_mode=xz-y`, `world_up_axis=y`, and ground
+axes `x/z` in metadata.
+
+### Interpretation
+
+- The upper-bound result is decisive: with GT root and decoded local pose,
+  M4Human test196 is about `52.1 mm`, essentially the current root-aligned
+  quality. This means the next tokenizer should prioritize root trajectory
+  modeling before spending more effort on local pose.
+- M4Human is slower than HumanML3D in physical root statistics. On test,
+  median speed is `0.088 m/s` vs HumanML3D `0.124 m/s`, and mean speed is
+  `0.164 m/s` vs `0.314 m/s`. The root issue is therefore not simply that
+  M4Human moves too fast; it is that the model loses direction/timing in the
+  root local velocity channel.
+- Smoothing 0.35s root controls changes M4Human only mildly:
+  `smoothed GT root + GT local` is `1.53 mm`, and
+  `smoothed GT root + decoded local` is `52.32 mm`. This suggests smoothed
+  root targets are safe as an optional root-branch target, but smoothing alone
+  is not a replacement for root prediction.
+- Foot contact labels are high-rate for both datasets and M4Human does not look
+  worse than HumanML3D by the simple contact-sliding metric. Contact quality is
+  not the main blocker for the first factorized tokenizer.
+- The factorized cache round-trip is effectively exact, so it is ready for the
+  local-only VQ baseline. The next experiment should train a local-only VQ on
+  `local_joints + local_joint_vel + contacts` and verify that it reaches about
+  `50-52 mm` root-aligned MPJPE on M4Human test196 before adding the continuous
+  root branch.
