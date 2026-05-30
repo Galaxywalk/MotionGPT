@@ -462,3 +462,154 @@ axes `x/z` in metadata.
   `local_joints + local_joint_vel + contacts` and verify that it reaches about
   `50-52 mm` root-aligned MPJPE on M4Human test196 before adding the continuous
   root branch.
+
+## Root/Local Factorized Tokenizer Phase 3-4
+
+This pass implements the first usable root/local tokenizer prototype inspired
+by RoHM's trajectory/local-pose decomposition. The local branch is discrete and
+the root branch is continuous:
+
+```text
+local branch: local_joints[21] + local_joint_vel[21] + contacts -> VQ codes
+root branch:  yaw_vel + local x/z velocity + root height -> continuous latent
+```
+
+The local representation intentionally excludes root yaw, root x/z velocity,
+and root height so the local VQ cannot leak global trajectory.
+
+### Code
+
+- Local VQ:
+  `src/motiongpt_m4human/factorized/local_vq.py`
+- Continuous root branch:
+  `src/motiongpt_m4human/factorized/root_branch.py`
+
+### Output Paths
+
+- Local VQ experiment:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1`
+- Root branch experiment:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_v1`
+- No-skip bottleneck root branch experiment:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_bottleneck_v1`
+- Cache:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz`
+
+### Local-Only VQ Setup
+
+- Input dim: `130`
+  - root-relative body local joints: `21 * 3`
+  - root-frame body local joint velocity: `21 * 3`
+  - foot contacts: `4`
+- Model: MotionGPT `VQVae` with `code_num=512`, `code_dim=512`,
+  `down_t=2`, `stride_t=2`.
+- Training: M4Human train split, 100 epochs, 100 steps/epoch,
+  batch size 256.
+- Window sampling: `[64, 128, 196]` with weights `[0.25, 0.25, 0.50]`.
+- Checkpoint:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt`
+
+### Local-Only VQ Results
+
+| split/window | MPJPE / root-align | local body MPJPE | local velocity error | contact F1 | unique / effective codes | tokens/window |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| test 64 | 52.084 / 52.084 mm | 54.565 mm | 123.179 mm/s | 0.9928 | 512 / 365.6 | 15.92 |
+| test 128 | 51.323 / 51.323 mm | 53.767 mm | 120.732 mm/s | 0.9929 | 512 / 360.2 | 30.97 |
+| test 196 | 51.168 / 51.168 mm | 53.604 mm | 119.827 mm/s | 0.9930 | 512 / 356.2 | 46.99 |
+| val 196 | 44.449 / 44.449 mm | 46.565 mm | 100.256 mm/s | 0.9949 | 489 / 267.9 | 48.37 |
+
+The token count is length dependent because the MotionGPT VQ-VAE downsamples
+the sequence temporally. A 196-frame clip produces about `47` local tokens in
+this setup.
+
+### Continuous Root Branch Setup
+
+The root branch is a small temporal Conv encoder/decoder conditioned on the
+frozen local VQ reconstruction. It predicts normalized root controls and is
+trained with physical trajectory losses:
+
+```text
+L_control
+L_yaw_vel
+L_local_xz_vel
+L_height
+L_global_root_pos
+L_global_root_step
+L_final_displacement
+L_path_length
+L_smooth
+```
+
+Training setup:
+
+- Frozen: local VQ model and codebook.
+- Trainable: continuous root branch only.
+- Data: M4Human train split.
+- Training: 50 epochs, 100 steps/epoch, batch size 256.
+- Window sampling: `[64, 128, 196]` with weights `[0.25, 0.25, 0.50]`.
+- Checkpoint:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_v1/checkpoints/best.pt`
+
+Two variants were tested:
+
+- `unet`: uses root encoder skip connections. This is useful as a wiring check
+  and optimistic continuous-root upper bound, but it is not a strict latent
+  bottleneck because root information can pass through skip features.
+- `bottleneck`: removes root skip connections. The decoder sees the continuous
+  root latent plus local VQ reconstruction, so this is the more relevant
+  tokenizer-style result.
+
+### Continuous Root Branch Results
+
+U-Net/skip upper-bound variant:
+
+| split/window | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| test 64 | 52.747 / 51.980 / 0.767 mm | 2.736 mm | 3.380 mm | -0.0001 m | -0.026 mm/s |
+| test 128 | 52.579 / 51.057 / 1.522 mm | 4.156 mm | 5.321 mm | -0.0005 m | -0.073 mm/s |
+| test 196 | 53.116 / 50.864 / 2.252 mm | 5.677 mm | 6.868 mm | -0.0009 m | -0.101 mm/s |
+| val 196 | 46.010 / 44.477 / 1.533 mm | 4.279 mm | 5.478 mm | 0.0022 m | 0.232 mm/s |
+
+No-skip bottleneck variant:
+
+| split/window | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| test 64 | 63.342 / 49.467 / 13.874 mm | 26.291 mm | 38.301 mm | -0.0079 m | -2.531 mm/s |
+| test 128 | 69.861 / 48.851 / 21.010 mm | 36.719 mm | 55.269 mm | -0.0116 m | -1.885 mm/s |
+| test 196 | 77.232 / 48.804 / 28.428 mm | 46.711 mm | 72.039 mm | -0.0182 m | -1.950 mm/s |
+| val 196 | 66.302 / 43.069 / 23.233 mm | 39.362 mm | 61.406 mm | -0.0170 m | -1.769 mm/s |
+
+### Comparison To Single-Stream Exp3
+
+| experiment | M4Human test196 MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Exp3 single-stream path/final | 101.077 / 52.429 / 48.648 mm | 76.054 mm | 118.717 mm | -0.0673 m | -7.202 mm/s |
+| Local-only VQ with GT root | 51.168 / 51.168 / ~0 mm | 0.000 mm | 0.000 mm | 0.0000 m | 0.000 mm/s |
+| Factorized U-Net root upper bound | 53.116 / 50.864 / 2.252 mm | 5.677 mm | 6.868 mm | -0.0009 m | -0.101 mm/s |
+| Factorized bottleneck root latent | 77.232 / 48.804 / 28.428 mm | 46.711 mm | 72.039 mm | -0.0182 m | -1.950 mm/s |
+
+### Interpretation
+
+- The local-only VQ passes the Phase 3 gate. It reaches `51.17 mm`
+  root-aligned MPJPE on M4Human test196, slightly better than the Exp3
+  single-stream root-aligned quality.
+- Codebook usage is healthy: all 512 codes are used on the test split and the
+  effective code count is about `356` for 196-frame windows.
+- The U-Net/skip root branch almost removes the full/root-aligned gap:
+  `48.65 mm -> 2.25 mm` on M4Human test196. This validates the root-loss and
+  recovery wiring, but should be treated as an optimistic upper bound because
+  root information can pass through skip connections.
+- The no-skip bottleneck branch is the more relevant tokenizer result. It
+  improves M4Human test196 from `101.08 / 52.43 / 48.65 mm` to
+  `77.23 / 48.80 / 28.43 mm`, meeting the Phase 4 target range of `70-85 mm`
+  full MPJPE.
+- The bottleneck still shows length-dependent root drift: gap increases from
+  `13.87 mm` at 64 frames to `28.43 mm` at 196 frames. This is much better than
+  Exp3 but not solved.
+- Speed/path bias are now much smaller than Exp3 (`-1.95 mm/s` speed bias and
+  `-0.018 m` path error at 196 frames), so the remaining bottleneck is likely
+  low-frequency endpoint/direction encoding in the continuous root latent.
+- The next experiment should improve the bottleneck root latent rather than
+  return to single-stream loss tuning. Good candidates are a deeper temporal
+  bottleneck decoder, integrated-yaw loss, endpoint-conditioned latent loss, or
+  a lightweight Transformer root branch while keeping the local VQ frozen.
