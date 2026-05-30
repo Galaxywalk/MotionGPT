@@ -154,3 +154,48 @@ Exp8a M4Human length breakdown:
   produced finite losses.
 - Real dataloader smoke checks confirmed M4Human batches log
   `recons_trajstep`, while HumanML3D-only batches skip it without NaNs.
+
+## Root Yaw / Local Velocity Oracle
+
+The diagnostic script `src/motiongpt_m4human/eval_root_oracle.py` decomposes
+root drift by replacing only the decoded root yaw velocity feature
+(`feature[..., 0]`) and/or decoded local x/z velocity features
+(`feature[..., 1:3]`) with ground truth before recovering joints.
+
+### Output Paths
+
+- Exp3:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/root_oracle/exp3_epoch649_m4human_test196.json`
+- Exp8a:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/root_oracle/exp8a_step005_epoch99_m4human_test196.json`
+
+### Exp3 Results
+
+| case | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Case 0 pred yaw + pred vel | 101.077 / 52.429 / 48.648 mm | 76.054 mm | 118.717 mm | -0.0673 m | -7.202 mm/s |
+| Case 1 GT yaw + pred vel | 91.515 / 50.423 / 41.092 mm | 67.053 mm | 102.709 mm | -0.0673 m | -7.202 mm/s |
+| Case 2 pred yaw + GT vel | 70.459 / 52.429 / 18.030 mm | 26.478 mm | 43.944 mm | ~0 m | ~0 mm/s |
+| Case 3 GT yaw + GT vel | 52.559 / 50.423 / 2.135 mm | 0.000 mm | 0.000 mm | 0 m | 0 mm/s |
+
+### Exp8a Results
+
+| case | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Case 0 pred yaw + pred vel | 100.858 / 52.303 / 48.555 mm | 76.068 mm | 118.300 mm | -0.0742 m | -7.940 mm/s |
+| Case 1 GT yaw + pred vel | 90.601 / 50.348 / 40.253 mm | 66.079 mm | 101.869 mm | -0.0742 m | -7.940 mm/s |
+| Case 2 pred yaw + GT vel | 70.938 / 52.303 / 18.635 mm | 27.123 mm | 44.164 mm | ~0 m | ~0 mm/s |
+| Case 3 GT yaw + GT vel | 52.671 / 50.348 / 2.323 mm | 0.000 mm | 0.000 mm | 0 m | 0 mm/s |
+
+### Interpretation
+
+- Local x/z velocity is the dominant source of the remaining root drift. On
+  Exp3, replacing local velocity with GT improves MPJPE by 30.6 mm, while
+  replacing yaw velocity alone improves MPJPE by 9.6 mm.
+- Yaw still matters through coupling: with GT local velocity but predicted yaw,
+  root xz mean error remains 26.5 mm and final xz error remains 43.9 mm.
+- Case 3 removes almost the entire full/root-aligned gap. This argues against a
+  major coordinate-convention or root-recovery bug in the current eval path.
+- The next structural direction should focus on the root local velocity branch,
+  with a secondary yaw/heading consistency term. More global path-length losses
+  are unlikely to solve the main issue.
