@@ -3,6 +3,7 @@
 from typing import List, Optional, Union
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch import Tensor, nn
 from torch.distributions.distribution import Distribution
 from .tools.resnet import Resnet1D
@@ -70,6 +71,22 @@ class VQVae(nn.Module):
         x = x.permute(0, 2, 1)
         return x
 
+    def _decode_quantized(self, x_quantized: Tensor):
+        x_decoder, x_hidden = self.decoder.forward_with_intermediates(
+            x_quantized)
+        x_out = self.postprocess(x_decoder)
+        hidden = self.postprocess(x_hidden)
+        latent = F.interpolate(
+            x_quantized,
+            size=x_decoder.shape[-1],
+            mode="nearest",
+        )
+        latent = self.postprocess(latent)
+        return x_out, {
+            "decoder_hidden": hidden,
+            "quantized": latent,
+        }
+
     def forward(self, features: Tensor):
         # Preprocess
         x_in = self.preprocess(features)
@@ -80,11 +97,16 @@ class VQVae(nn.Module):
         # quantization
         x_quantized, loss, perplexity = self.quantizer(x_encoder)
 
-        # decoder
-        x_decoder = self.decoder(x_quantized)
-        x_out = self.postprocess(x_decoder)
+        x_out, _ = self._decode_quantized(x_quantized)
 
         return x_out, loss, perplexity
+
+    def forward_with_intermediates(self, features: Tensor):
+        x_in = self.preprocess(features)
+        x_encoder = self.encoder(x_in)
+        x_quantized, loss, perplexity = self.quantizer(x_encoder)
+        x_out, intermediates = self._decode_quantized(x_quantized)
+        return x_out, loss, perplexity, intermediates
 
     def encode(
         self,
@@ -108,10 +130,14 @@ class VQVae(nn.Module):
         x_d = self.quantizer.dequantize(z)
         x_d = x_d.view(1, -1, self.code_dim).permute(0, 2, 1).contiguous()
 
-        # decoder
-        x_decoder = self.decoder(x_d)
-        x_out = self.postprocess(x_decoder)
+        x_out, _ = self._decode_quantized(x_d)
         return x_out
+
+    def decode_with_intermediates(self, z: Tensor):
+        x_d = self.quantizer.dequantize(z)
+        x_d = x_d.view(1, -1, self.code_dim).permute(0, 2, 1).contiguous()
+        x_out, intermediates = self._decode_quantized(x_d)
+        return x_out, intermediates
 
 
 class Encoder(nn.Module):
@@ -188,3 +214,10 @@ class Decoder(nn.Module):
 
     def forward(self, x):
         return self.model(x)
+
+    def forward_with_intermediates(self, x):
+        hidden = x
+        for layer in self.model[:-1]:
+            hidden = layer(hidden)
+        out = self.model[-1](hidden)
+        return out, hidden

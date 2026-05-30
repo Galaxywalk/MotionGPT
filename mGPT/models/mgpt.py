@@ -4,7 +4,7 @@ import random
 import torch
 import time
 from mGPT.archs.root_correction import RootCorrectionHead
-from mGPT.config import instantiate_from_config
+from mGPT.config import get_obj_from_str, instantiate_from_config
 from mGPT.data.humanml.scripts.motion_process import recover_root_rot_pos
 from os.path import join as pjoin
 from mGPT.losses.mgpt import GPTLosses
@@ -106,8 +106,32 @@ class MotionGPT(BaseModel):
         if not self.root_correction_enabled:
             return
 
+        self.root_correction_inputs = [
+            str(item) for item in head_cfg.get("INPUTS", ["decoded"])
+        ]
+        input_dims = {
+            "decoded": int(self.hparams.cfg.DATASET.NFEATS),
+            "decoder_hidden": int(head_cfg.get(
+                "DECODER_HIDDEN_DIM",
+                self.hparams.cfg.model.params.motion_vae.params.get(
+                    "width", 512))),
+            "quantized": int(head_cfg.get(
+                "QUANTIZED_DIM",
+                self.hparams.cfg.model.params.motion_vae.params.get(
+                    "code_dim", 512))),
+        }
+        unknown_inputs = [
+            name for name in self.root_correction_inputs
+            if name not in input_dims
+        ]
+        if unknown_inputs:
+            raise ValueError(
+                f"Unsupported ROOT_CORRECTION_HEAD.INPUTS={unknown_inputs}")
+        correction_input_dim = sum(
+            input_dims[name] for name in self.root_correction_inputs)
+
         self.root_correction_head = RootCorrectionHead(
-            nfeats=int(self.hparams.cfg.DATASET.NFEATS),
+            nfeats=correction_input_dim,
             hidden_dims=head_cfg.get("HIDDEN_DIMS", [256, 128]),
             kernel_size=int(head_cfg.get("KERNEL_SIZE", 3)),
             output_dim=3,
@@ -118,6 +142,38 @@ class MotionGPT(BaseModel):
             self.vae.eval()
             for param in self.vae.parameters():
                 param.requires_grad = False
+
+        self.root_correction_decoder_tail_modules = []
+        tail_modules = int(head_cfg.get("UNFREEZE_DECODER_TAIL_MODULES", 0))
+        if tail_modules > 0 and hasattr(self, "vae"):
+            decoder_modules = list(self.vae.decoder.model.children())
+            for module in decoder_modules[-tail_modules:]:
+                self.root_correction_decoder_tail_modules.append(module)
+                for param in module.parameters():
+                    param.requires_grad = True
+            if bool(head_cfg.get("ROOT_OUTPUT_ONLY", True)):
+                self._register_root_output_grad_mask()
+
+    def _register_root_output_grad_mask(self):
+        if not hasattr(self, "vae"):
+            return
+        final = self.vae.decoder.model[-1]
+        if not isinstance(final, torch.nn.Conv1d):
+            return
+
+        def mask_weight_grad(grad):
+            masked = grad.clone()
+            masked[3:] = 0.0
+            return masked
+
+        def mask_bias_grad(grad):
+            masked = grad.clone()
+            masked[3:] = 0.0
+            return masked
+
+        final.weight.register_hook(mask_weight_grad)
+        if final.bias is not None:
+            final.bias.register_hook(mask_bias_grad)
 
     def _root_velocity_scale(self):
         bounds = self.root_velocity_scale_bounds.to(self.root_velocity_scale_logit)
@@ -173,7 +229,20 @@ class MotionGPT(BaseModel):
             dtype=torch.bool,
         )
 
-    def _apply_root_correction(self, feats, batch=None):
+    def _root_correction_input(self, feats, intermediates=None):
+        inputs = []
+        for name in getattr(self, "root_correction_inputs", ["decoded"]):
+            if name == "decoded":
+                inputs.append(feats)
+                continue
+            if intermediates is None or name not in intermediates:
+                raise RuntimeError(
+                    f"Root correction input '{name}' requires VQ-VAE "
+                    "intermediates")
+            inputs.append(intermediates[name])
+        return torch.cat(inputs, dim=-1)
+
+    def _apply_root_correction(self, feats, batch=None, intermediates=None):
         if not getattr(self, "root_correction_enabled", False):
             return feats
         if not hasattr(self, "root_correction_head"):
@@ -182,13 +251,25 @@ class MotionGPT(BaseModel):
         if mask is not None and not bool(mask.any()):
             return feats
 
-        delta = self.root_correction_head(feats)
+        correction_input = self._root_correction_input(feats, intermediates)
+        delta = self.root_correction_head(correction_input)
         corrected = feats.clone()
         if mask is None:
             corrected[..., :3] = corrected[..., :3] + delta
         else:
             corrected[mask, :, :3] = corrected[mask, :, :3] + delta[mask]
         return corrected
+
+    def _vae_forward_for_root_correction(self, features):
+        needs_intermediates = any(
+            name != "decoded"
+            for name in getattr(self, "root_correction_inputs", ["decoded"]))
+        if getattr(self, "root_correction_enabled", False) and needs_intermediates:
+            feats_rst, loss_commit, perplexity, intermediates = (
+                self.vae.forward_with_intermediates(features))
+            return feats_rst, loss_commit, perplexity, intermediates
+        feats_rst, loss_commit, perplexity = self.vae(features)
+        return feats_rst, loss_commit, perplexity, None
 
     def load_state_dict(self, state_dict, strict=True):
         if self.lm is None:
@@ -209,6 +290,97 @@ class MotionGPT(BaseModel):
         if mode and freeze_vae and hasattr(self, "vae"):
             self.vae.eval()
         return self
+
+    def _module_grad_norm(self, module):
+        total = None
+        for param in module.parameters():
+            if param.grad is None:
+                continue
+            value = param.grad.detach().norm(2).pow(2)
+            total = value if total is None else total + value
+        if total is None:
+            return torch.tensor(0.0, device=self.device)
+        return total.sqrt()
+
+    def on_before_optimizer_step(self, optimizer):
+        if not getattr(self, "root_correction_enabled", False):
+            return
+        if self.trainer.sanity_checking:
+            return
+        if hasattr(self, "root_correction_head"):
+            self.log(
+                "grad/root_correction_head",
+                self._module_grad_norm(self.root_correction_head),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                rank_zero_only=True,
+            )
+        modules = getattr(self, "root_correction_decoder_tail_modules", [])
+        if modules:
+            total = torch.tensor(0.0, device=self.device)
+            for module in modules:
+                total = total + self._module_grad_norm(module).pow(2)
+            self.log(
+                "grad/decoder_tail",
+                total.sqrt(),
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                rank_zero_only=True,
+            )
+
+    def configure_optimizers(self):
+        if not getattr(self, "root_correction_enabled", False):
+            return super().configure_optimizers()
+
+        cfg = self.hparams.cfg
+        head_cfg = cfg.get("ROOT_CORRECTION_HEAD", {})
+        optim_target = cfg.TRAIN.OPTIM.target
+        if len(optim_target.split('.')) == 1:
+            optim_target = 'torch.optim.' + optim_target
+        base_lr = float(cfg.TRAIN.OPTIM.params.lr)
+        head_lr = float(head_cfg.get("HEAD_LR", base_lr))
+        tail_lr = float(head_cfg.get("DECODER_TAIL_LR", base_lr))
+
+        grouped_ids = set()
+        param_groups = []
+        head_params = [
+            param for param in self.root_correction_head.parameters()
+            if param.requires_grad
+        ]
+        if head_params:
+            grouped_ids.update(id(param) for param in head_params)
+            param_groups.append({"params": head_params, "lr": head_lr})
+
+        tail_params = []
+        for module in getattr(self, "root_correction_decoder_tail_modules", []):
+            tail_params.extend([
+                param for param in module.parameters()
+                if param.requires_grad and id(param) not in grouped_ids
+            ])
+        if tail_params:
+            grouped_ids.update(id(param) for param in tail_params)
+            param_groups.append({"params": tail_params, "lr": tail_lr})
+
+        other_params = [
+            param for param in self.parameters()
+            if param.requires_grad and id(param) not in grouped_ids
+        ]
+        if other_params:
+            param_groups.append({"params": other_params, "lr": base_lr})
+
+        optim_params = dict(cfg.TRAIN.OPTIM.params)
+        optim_params.pop("lr", None)
+        optimizer = get_obj_from_str(optim_target)(
+            params=param_groups, **optim_params)
+
+        scheduler_target = cfg.TRAIN.LR_SCHEDULER.target
+        if len(scheduler_target.split('.')) == 1:
+            scheduler_target = 'torch.optim.lr_scheduler.' + scheduler_target
+        lr_scheduler = get_obj_from_str(scheduler_target)(
+            optimizer=optimizer, **cfg.TRAIN.LR_SCHEDULER.params)
+        return {'optimizer': optimizer, 'lr_scheduler': lr_scheduler}
 
     def forward(self, batch, task="t2m"):
         if self.lm is None:
@@ -457,9 +629,10 @@ class MotionGPT(BaseModel):
         # batch detach
         feats_ref = batch["motion"]
         # motion encode & decode
-        feats_rst, loss_commit, perplexity = self.vae(feats_ref)
+        feats_rst, loss_commit, perplexity, intermediates = (
+            self._vae_forward_for_root_correction(feats_ref))
         feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
-        feats_rst = self._apply_root_correction(feats_rst, batch)
+        feats_rst = self._apply_root_correction(feats_rst, batch, intermediates)
         feats_ref_denorm = self.datamodule.denormalize(feats_ref)
         feats_rst_denorm = self.datamodule.denormalize(feats_rst)
         _, root_ref = recover_root_rot_pos(feats_ref_denorm)
@@ -496,7 +669,16 @@ class MotionGPT(BaseModel):
         for i in range(len(feats_ref)):
             if lengths[i] == 0:
                 continue
-            feats_pred, _, _ = self.vae(feats_ref[i:i + 1, :lengths[i]])
+            feats_pred, _, _, intermediates = self._vae_forward_for_root_correction(
+                feats_ref[i:i + 1, :lengths[i]])
+            sample_batch = None
+            if "domain" in batch:
+                sample_batch = {"domain": [batch["domain"][i]]}
+            feats_pred = self._apply_root_velocity_calibration(
+                feats_pred, sample_batch)
+            if getattr(self, "root_correction_enabled", False):
+                feats_pred = self._apply_root_correction(
+                    feats_pred, sample_batch, intermediates)
             feats_rst[i:i + 1, :feats_pred.shape[1], :] = feats_pred
 
             # codeFre_pred = torch.bincount(code_pred[0],
@@ -507,8 +689,6 @@ class MotionGPT(BaseModel):
 
         # np.save('../memData/results/codeFrequency.npy',
         #         self.codeFrequency.cpu().numpy())
-        feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
-        feats_rst = self._apply_root_correction(feats_rst, batch)
 
         # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)

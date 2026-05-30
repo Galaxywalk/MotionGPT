@@ -66,26 +66,60 @@ class RootVelocityCalibratedVQVae(torch.nn.Module):
 
 
 class RootCorrectedVQVae(torch.nn.Module):
-    def __init__(self, vae: torch.nn.Module, head: RootCorrectionHead) -> None:
+    def __init__(
+        self,
+        vae: torch.nn.Module,
+        head: RootCorrectionHead,
+        inputs: list[str],
+    ) -> None:
         super().__init__()
         self.vae = vae
         self.root_correction_head = head
+        self.inputs = inputs
 
-    def _apply_correction(self, feats: torch.Tensor) -> torch.Tensor:
-        delta = self.root_correction_head(feats)
+    def _correction_input(self, feats: torch.Tensor, intermediates: dict[str, torch.Tensor] | None) -> torch.Tensor:
+        items = []
+        for name in self.inputs:
+            if name == "decoded":
+                items.append(feats)
+            else:
+                if intermediates is None or name not in intermediates:
+                    raise RuntimeError(
+                        f"Root correction input '{name}' requires VQ-VAE intermediates")
+                items.append(intermediates[name])
+        return torch.cat(items, dim=-1)
+
+    def _apply_correction(
+        self,
+        feats: torch.Tensor,
+        intermediates: dict[str, torch.Tensor] | None,
+    ) -> torch.Tensor:
+        correction_input = self._correction_input(feats, intermediates)
+        delta = self.root_correction_head(correction_input)
         feats = feats.clone()
         feats[..., :3] = feats[..., :3] + delta
         return feats
 
     def forward(self, *args, **kwargs):
-        feats, loss_commit, perplexity = self.vae(*args, **kwargs)
-        return self._apply_correction(feats), loss_commit, perplexity
+        if hasattr(self.vae, "forward_with_intermediates") and any(
+                name != "decoded" for name in self.inputs):
+            feats, loss_commit, perplexity, intermediates = self.vae.forward_with_intermediates(*args, **kwargs)
+        else:
+            feats, loss_commit, perplexity = self.vae(*args, **kwargs)
+            intermediates = None
+        return self._apply_correction(feats, intermediates), loss_commit, perplexity
 
     def encode(self, *args, **kwargs):
         return self.vae.encode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
-        return self._apply_correction(self.vae.decode(*args, **kwargs))
+        if hasattr(self.vae, "decode_with_intermediates") and any(
+                name != "decoded" for name in self.inputs):
+            feats, intermediates = self.vae.decode_with_intermediates(*args, **kwargs)
+        else:
+            feats = self.vae.decode(*args, **kwargs)
+            intermediates = None
+        return self._apply_correction(feats, intermediates)
 
 
 def numpy_core_reconstruct(*args, **kwargs):
@@ -327,8 +361,16 @@ def load_vqvae(
         if key.startswith("root_correction_head.")
     }
     if head_state:
+        input_dim = int(head_state["net.0.weight"].shape[1])
+        if input_dim == 263:
+            head_inputs = ["decoded"]
+        elif input_dim == 263 + 512 + 512:
+            head_inputs = ["decoded", "decoder_hidden", "quantized"]
+        else:
+            raise RuntimeError(
+                f"Cannot infer root correction inputs for head input dim {input_dim}")
         head = RootCorrectionHead(
-            nfeats=263,
+            nfeats=input_dim,
             hidden_dims=[256, 128],
             kernel_size=3,
             output_dim=3,
@@ -341,8 +383,10 @@ def load_vqvae(
                 f"missing={missing[:8]}, unexpected={unexpected[:8]}"
             )
         calibration_meta["root_correction_available"] = True
+        calibration_meta["root_correction_inputs"] = head_inputs
         if calibration_domain in ("m4human", "all", "*"):
-            model = RootCorrectedVQVae(model, head.to(device)).to(device)
+            model = RootCorrectedVQVae(
+                model, head.to(device), head_inputs).to(device)
             model.eval()
             calibration_meta["root_correction_applied"] = True
     return model, {

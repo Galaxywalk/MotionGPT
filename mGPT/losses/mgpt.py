@@ -24,6 +24,9 @@ class GPTLosses(BaseLosses):
         self.speed_domain = cfg.LOSS.get("SPEED_DOMAIN", "")
         self.traj_domain = cfg.LOSS.get("TRAJ_DOMAIN", "")
         self.root_domain = cfg.LOSS.get("ROOT_DOMAIN", self.traj_domain)
+        self.root_vel_fps = float(cfg.LOSS.get("ROOT_VEL_FPS", self.speed_fps))
+        self.root_vel_unit = str(cfg.LOSS.get("ROOT_VEL_UNIT", "feature")).lower()
+        self.root_yaw_unit = str(cfg.LOSS.get("ROOT_YAW_UNIT", "feature")).lower()
 
         # Define losses
         losses = []
@@ -123,6 +126,24 @@ class GPTLosses(BaseLosses):
             return None, None
         return root_ref[mask], root_rst[mask]
 
+    def _scale_root_velocity(self, value):
+        if self.root_vel_unit in ("feature", "frame", "m_per_frame"):
+            return value
+        if self.root_vel_unit in ("mps", "m/s", "meter_per_second"):
+            return value * self.root_vel_fps
+        if self.root_vel_unit in ("mmps", "mm/s", "millimeter_per_second"):
+            return value * self.root_vel_fps * 1000.0
+        raise ValueError(f"Unsupported ROOT_VEL_UNIT={self.root_vel_unit}")
+
+    def _scale_root_yaw(self, value):
+        if self.root_yaw_unit in ("feature", "frame", "rad_per_frame"):
+            return value
+        if self.root_yaw_unit in ("radps", "rad/s", "radian_per_second"):
+            return value * self.root_vel_fps
+        if self.root_yaw_unit in ("degps", "deg/s", "degree_per_second"):
+            return value * self.root_vel_fps * 180.0 / torch.pi
+        raise ValueError(f"Unsupported ROOT_YAW_UNIT={self.root_yaw_unit}")
+
     def update(self, rs_set):
         '''Update the losses'''
         total: float = 0.0
@@ -152,14 +173,14 @@ class GPTLosses(BaseLosses):
             if "recons_rootvel" in self._params and root_feat_ref is not None:
                 total += self._update_loss(
                     "recons_rootvel",
-                    root_feat_rst[..., 1:3],
-                    root_feat_ref[..., 1:3],
+                    self._scale_root_velocity(root_feat_rst[..., 1:3]),
+                    self._scale_root_velocity(root_feat_ref[..., 1:3]),
                 )
             if "recons_rootyaw" in self._params and root_feat_ref is not None:
                 total += self._update_loss(
                     "recons_rootyaw",
-                    root_feat_rst[..., 0:1],
-                    root_feat_ref[..., 0:1],
+                    self._scale_root_yaw(root_feat_rst[..., 0:1]),
+                    self._scale_root_yaw(root_feat_ref[..., 0:1]),
                 )
 
             root_ref, root_rst = self._select_domain_tensors(

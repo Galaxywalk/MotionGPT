@@ -272,3 +272,100 @@ Next options are either to increase the root-velocity objective in physical
 units, for example by training on mm/s-scaled velocity loss, or to unfreeze the
 decoder tail/root-specific layers so the correction is not fighting a frozen
 decoder output alone.
+
+## Root Correction Tail + Physical Velocity Loss
+
+This pass strengthens the previous correction-head experiment in two ways:
+
+- The root correction head can read `decoded`, `decoder_hidden`, and
+  upsampled `quantized` latent features instead of only the decoded 263-D
+  feature.
+- The VQ-VAE decoder tail is partially unfrozen while the encoder and codebook
+  stay frozen. A gradient mask keeps the final decoder Conv1d update limited to
+  the first three root channels.
+
+The root velocity and yaw losses can now be computed in physical units with
+`LOSS.ROOT_VEL_UNIT=mmps` and `LOSS.ROOT_YAW_UNIT=degps`. The model also logs
+gradient norms for the correction head and decoder tail.
+
+Config:
+`configs/config_h3d_m4human_mix70_multilen_rootcorr_tail_phys_stage1.yaml`
+
+### Checkpoint and Outputs
+
+- Checkpoint:
+  `experiments/mgpt/VQVAE_HumanML3D_M4Human20Hz_mix70_lr1e4_multilen_rootcorr_tail_phys/checkpoints/epoch=49.ckpt`
+- Eval directory:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/rootcorr_tail_phys_epoch49`
+
+### Training Setup
+
+- Init: Exp3 epoch649
+- Frozen: encoder, codebook, decoder body except tail
+- Trainable: last three decoder modules plus `RootCorrectionHead`, 2.3M
+  parameters
+- Correction input: decoded 263-D + decoder hidden 512-D + quantized latent
+  512-D
+- Data: HumanML3D + M4Human mix70, multi-length `[64, 128, 196]` with weights
+  `[0.25, 0.25, 0.50]`
+- Domain: correction and root trajectory losses apply only to M4Human
+- Loss weights:
+  `root_vel=0.001` in mm/s, `root_yaw=0.001` in deg/s,
+  `final=0.02`, `path=0.005`
+- LR: correction head `1e-4`, decoder tail `1e-5`
+- Epochs: 50
+
+Smoke check before training:
+
+- Trainable tensors: final decoder root-channel Conv1d weights/bias, two tail
+  decoder conv layers, and correction head parameters.
+- One real M4Human batch produced finite loss `0.8098`.
+- Raw losses on that batch: `root_vel_phys=100.65 mm/s`,
+  `root_yaw=5.58 deg/s`.
+- Gradient norms were nonzero: correction head `0.0128`, decoder tail `0.0356`.
+
+### Results
+
+| experiment | M4Human test 196 MPJPE / root-align / gap | root xz mean | final xz | speed bias | path error | HumanML3D official FID / MPJPE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Exp3 path/final | 101.077 / 52.429 / 48.648 mm | 76.054 mm | 118.717 mm | -7.202 mm/s | -0.0673 m | 0.182322 / 48.643 mm |
+| Root correction head | 100.340 / 52.410 / 47.929 mm | 75.203 mm | 116.994 mm | -8.261 mm/s | -0.0767 m | 0.182322 / 48.643 mm |
+| Tail + physical loss | 99.956 / 52.257 / 47.698 mm | 74.802 mm | 116.003 mm | -10.276 mm/s | -0.0961 m | 0.192576 / 48.487 mm |
+
+Length breakdown:
+
+| split/window | MPJPE / root-align / gap |
+| --- | ---: |
+| test 64 | 71.627 / 50.626 / 21.001 mm |
+| test 128 | 87.062 / 51.387 / 35.675 mm |
+| test 196 | 99.956 / 52.257 / 47.698 mm |
+
+Oracle after tail + physical loss:
+
+| case | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Case 0 pred yaw + pred vel | 99.956 / 52.257 / 47.698 mm | 74.802 mm | 116.003 mm | -0.0961 m | -10.276 mm/s |
+| Case 1 GT yaw + pred vel | 90.311 / 50.294 / 40.017 mm | 65.625 mm | 99.699 mm | -0.0961 m | -10.276 mm/s |
+| Case 2 pred yaw + GT vel | 70.393 / 52.257 / 18.136 mm | 26.566 mm | 43.879 mm | ~0 m | ~0 mm/s |
+| Case 3 GT yaw + GT vel | 52.472 / 50.294 / 2.178 mm | 0.000 mm | 0.000 mm | 0 m | 0 mm/s |
+
+### Interpretation
+
+- Unfreezing the decoder tail and giving the correction head richer inputs is a
+  weak positive result, but still far from the desired 80-90 mm test196 MPJPE.
+  It improves Exp3 by about 1.1 mm full MPJPE and 1.0 mm gap.
+- HumanML3D is still protected: FID moves from 0.182 to 0.193 and MPJPE is
+  essentially unchanged.
+- The local-velocity bottleneck remains. Speed bias worsens to `-10.276 mm/s`
+  and path underestimation worsens to `-0.0961 m`, even though endpoint/root
+  position improves slightly.
+- The physical-unit velocity loss is wired correctly and produces gradients,
+  but with the conservative `0.001` weight it does not dominate the decoder's
+  existing reconstruction balance. Increasing it may reduce speed bias, but the
+  previous speed-loss experiment warns that matching speed alone can worsen
+  endpoint error.
+- This result strengthens the structural conclusion: a late residual head,
+  even with decoder tail adaptation, only has limited ability to recover root
+  local velocity from the current VQ latent. A cleaner next direction is a
+  dedicated root-trajectory branch or a codebook/objective that preserves root
+  local velocity before the VQ bottleneck.
