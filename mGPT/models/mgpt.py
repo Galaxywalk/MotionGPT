@@ -4,6 +4,7 @@ import random
 import torch
 import time
 from mGPT.config import instantiate_from_config
+from mGPT.data.humanml.scripts.motion_process import recover_root_rot_pos
 from os.path import join as pjoin
 from mGPT.losses.mgpt import GPTLosses
 from mGPT.models.base import BaseModel
@@ -39,6 +40,7 @@ class MotionGPT(BaseModel):
         # Instantiate motion tokenizer
         if motion_vae != None:
             self.vae = instantiate_from_config(motion_vae)
+        self._configure_root_velocity_calibration(cfg)
 
         # Instantiate the motion-language model only for LM stages.
         self.lm = instantiate_from_config(lm) if 'lm' in self.hparams.stage else None
@@ -61,6 +63,79 @@ class MotionGPT(BaseModel):
         # Count codebook frequency
         self.codePred = []
         self.codeFrequency = torch.zeros((self.hparams.codebook_size, ))
+
+    def _configure_root_velocity_calibration(self, cfg):
+        calib_cfg = cfg.get("ROOT_VEL_CALIB", {})
+        self.root_velocity_calib_enabled = bool(calib_cfg.get("ENABLED", False))
+        self.root_velocity_calib_domain = str(calib_cfg.get("DOMAIN", "m4human"))
+        if not self.root_velocity_calib_enabled:
+            return
+
+        scale_min = float(calib_cfg.get("SCALE_MIN", 0.8))
+        scale_max = float(calib_cfg.get("SCALE_MAX", 1.3))
+        if not scale_min < 1.0 < scale_max:
+            raise ValueError("ROOT_VEL_CALIB scale range must contain 1.0")
+        init_scale = float(calib_cfg.get("INIT_SCALE", 1.0))
+        init_scale = min(max(init_scale, scale_min + 1e-6), scale_max - 1e-6)
+        init_prob = (init_scale - scale_min) / (scale_max - scale_min)
+        init_logit = float(np.log(init_prob / (1.0 - init_prob)))
+
+        self.register_buffer(
+            "root_velocity_scale_bounds",
+            torch.tensor([scale_min, scale_max], dtype=torch.float32),
+        )
+        self.root_velocity_scale_logit = torch.nn.Parameter(
+            torch.full((2,), init_logit, dtype=torch.float32)
+        )
+        if bool(calib_cfg.get("AFFINE", False)):
+            self.root_velocity_bias = torch.nn.Parameter(torch.zeros(2, dtype=torch.float32))
+
+        if bool(calib_cfg.get("FREEZE_VAE", False)) and hasattr(self, "vae"):
+            self.vae.eval()
+            for param in self.vae.parameters():
+                param.requires_grad = False
+
+    def _root_velocity_scale(self):
+        bounds = self.root_velocity_scale_bounds.to(self.root_velocity_scale_logit)
+        scale_min, scale_max = bounds[0], bounds[1]
+        return scale_min + (scale_max - scale_min) * torch.sigmoid(
+            self.root_velocity_scale_logit
+        )
+
+    def _root_velocity_domain_mask(self, batch, device, batch_size):
+        domain = getattr(self, "root_velocity_calib_domain", "m4human")
+        if domain in ("all", "*"):
+            return None
+        if batch is None or "domain" not in batch:
+            return torch.zeros(batch_size, device=device, dtype=torch.bool)
+        return torch.tensor(
+            [item == domain for item in batch["domain"]],
+            device=device,
+            dtype=torch.bool,
+        )
+
+    def _apply_root_velocity_calibration(self, feats, batch=None):
+        if not getattr(self, "root_velocity_calib_enabled", False):
+            return feats
+        if not hasattr(self, "root_velocity_scale_logit"):
+            return feats
+        mask = self._root_velocity_domain_mask(batch, feats.device, feats.shape[0])
+        if mask is not None and not bool(mask.any()):
+            return feats
+
+        scale = self._root_velocity_scale().to(device=feats.device, dtype=feats.dtype)
+        bias = getattr(self, "root_velocity_bias", None)
+        if bias is None:
+            bias = torch.zeros_like(scale)
+        else:
+            bias = bias.to(device=feats.device, dtype=feats.dtype)
+
+        calibrated = feats.clone()
+        if mask is None:
+            calibrated[..., 1:3] = calibrated[..., 1:3] * scale + bias
+        else:
+            calibrated[mask, :, 1:3] = calibrated[mask, :, 1:3] * scale + bias
+        return calibrated
 
     def load_state_dict(self, state_dict, strict=True):
         if self.lm is None:
@@ -325,10 +400,18 @@ class MotionGPT(BaseModel):
         feats_ref = batch["motion"]
         # motion encode & decode
         feats_rst, loss_commit, perplexity = self.vae(feats_ref)
+        feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
+        feats_ref_denorm = self.datamodule.denormalize(feats_ref)
+        feats_rst_denorm = self.datamodule.denormalize(feats_rst)
+        _, root_ref = recover_root_rot_pos(feats_ref_denorm)
+        _, root_rst = recover_root_rot_pos(feats_rst_denorm)
         # return set
         rs_set = {
             "m_ref": feats_ref,
             "m_rst": feats_rst,
+            "root_ref": root_ref,
+            "root_rst": root_rst,
+            "domain": batch.get("domain"),
             "loss_commit": loss_commit,
             "perplexity": perplexity,
         }
@@ -363,6 +446,7 @@ class MotionGPT(BaseModel):
 
         # np.save('../memData/results/codeFrequency.npy',
         #         self.codeFrequency.cpu().numpy())
+        feats_rst = self._apply_root_velocity_calibration(feats_rst, batch)
 
         # Recover joints for evaluation
         joints_ref = self.feats2joints(feats_ref)

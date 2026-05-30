@@ -204,7 +204,7 @@ class M4HumanFeatureDatasetVQ(data.Dataset):
         motion = np.asarray(motion[start:start + window_size], dtype=np.float32)
         motion = (motion - self.mean) / self.std
 
-        return None, motion, window_size, None, None, None, None,
+        return None, motion, window_size, None, None, None, None, "m4human"
 
 
 class MixedMotionDatasetVQ(data.Dataset):
@@ -230,7 +230,10 @@ class MixedMotionDatasetVQ(data.Dataset):
         if self.m4human_ratio > 0.0 and random.random() < self.m4human_ratio:
             m4_item = random.randrange(len(self.m4human_dataset))
             return self.m4human_dataset[(m4_item, window_size)]
-        return self.humanml_dataset[(item % len(self.humanml_dataset), window_size)]
+        sample = self.humanml_dataset[(item % len(self.humanml_dataset), window_size)]
+        if sample[0] is None:
+            return (*sample, "humanml3d")
+        return sample
 
 
 class MultiWindowTrainMixin:

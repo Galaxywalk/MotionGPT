@@ -291,7 +291,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     out_root = Path(args.out_root).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
     device = resolve_device(args.device)
-    model, ckpt_meta = load_vqvae(Path(args.checkpoint), device)
+    calibration_domain = args.calibration_domain
+    if calibration_domain == "auto":
+        calibration_domain = args.sources[0] if len(args.sources) == 1 else "none"
+    model, ckpt_meta = load_vqvae(Path(args.checkpoint), device, calibration_domain)
     mean = torch.from_numpy(np.load(args.mean).astype(np.float32)).to(device)
     std = torch.from_numpy(np.load(args.std).astype(np.float32)).to(device)
 
@@ -315,6 +318,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "include_tail": args.include_tail,
         "min_window_frames": args.min_window_frames,
         "fps": args.fps,
+        "calibration_domain": calibration_domain,
         "results": results,
     }
     (out_root / "root_reconstruction_summary.json").write_text(
@@ -355,6 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sequences", type=int, default=0)
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--device", default="auto")
+    parser.add_argument("--calibration-domain", default="auto")
     parser.add_argument("--log-every", type=int, default=500)
     return parser
 

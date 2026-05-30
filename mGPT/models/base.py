@@ -87,7 +87,7 @@ class BaseModel(LightningModule):
 
     def load_state_dict(self, state_dict, strict=True):
         new_state_dict = self.preprocess_state_dict(state_dict)
-        super().load_state_dict(new_state_dict, strict)
+        return super().load_state_dict(new_state_dict, strict)
 
     def step_log_dict(self):
         return {

@@ -9,8 +9,18 @@ def load_pretrained(cfg, model, logger=None, phase="train"):
     elif phase == "test":
         ckpt_path = cfg.TEST.CHECKPOINTS
         
-    state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
-    model.load_state_dict(state_dict, strict=True)
+    try:
+        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    except TypeError:
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+    state_dict = checkpoint["state_dict"]
+    strict = cfg.TRAIN.get("PRETRAINED_STRICT", True) if phase == "train" else True
+    missing, unexpected = model.load_state_dict(state_dict, strict=strict)
+    if logger is not None and not strict:
+        logger.info(
+            "Loaded pretrained model with strict=False: "
+            f"missing={missing[:20]}, unexpected={unexpected[:20]}"
+        )
     return model
 
 

@@ -22,6 +22,48 @@ DEFAULT_MEAN = "deps/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta/mean.npy"
 DEFAULT_STD = "deps/t2m/VQVAEV3_CB1024_CMT_H1024_NRES3/meta/std.npy"
 
 
+class RootVelocityCalibratedVQVae(torch.nn.Module):
+    def __init__(
+        self,
+        vae: VQVae,
+        scale_logit: torch.Tensor,
+        bounds: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> None:
+        super().__init__()
+        self.vae = vae
+        self.register_buffer("root_velocity_scale_logit", scale_logit.detach().clone().float())
+        self.register_buffer("root_velocity_scale_bounds", bounds.detach().clone().float())
+        if bias is not None:
+            self.register_buffer("root_velocity_bias", bias.detach().clone().float())
+
+    def _scale(self, x: torch.Tensor) -> torch.Tensor:
+        bounds = self.root_velocity_scale_bounds.to(device=x.device, dtype=x.dtype)
+        logits = self.root_velocity_scale_logit.to(device=x.device, dtype=x.dtype)
+        return bounds[0] + (bounds[1] - bounds[0]) * torch.sigmoid(logits)
+
+    def _apply_calibration(self, feats: torch.Tensor) -> torch.Tensor:
+        scale = self._scale(feats)
+        bias = getattr(self, "root_velocity_bias", None)
+        if bias is None:
+            bias = torch.zeros_like(scale)
+        else:
+            bias = bias.to(device=feats.device, dtype=feats.dtype)
+        feats = feats.clone()
+        feats[..., 1:3] = feats[..., 1:3] * scale + bias
+        return feats
+
+    def forward(self, *args, **kwargs):
+        feats, loss_commit, perplexity = self.vae(*args, **kwargs)
+        return self._apply_calibration(feats), loss_commit, perplexity
+
+    def encode(self, *args, **kwargs):
+        return self.vae.encode(*args, **kwargs)
+
+    def decode(self, *args, **kwargs):
+        return self._apply_calibration(self.vae.decode(*args, **kwargs))
+
+
 def numpy_core_reconstruct(*args, **kwargs):
     return numpy_reconstruct(*args, **kwargs)
 
@@ -178,7 +220,11 @@ def install_omegaconf_checkpoint_shim() -> list[Any]:
     return symbols
 
 
-def load_vqvae(checkpoint_path: Path, device: torch.device) -> tuple[VQVae, dict[str, Any]]:
+def load_vqvae(
+    checkpoint_path: Path,
+    device: torch.device,
+    calibration_domain: str = "none",
+) -> tuple[torch.nn.Module, dict[str, Any]]:
     model = VQVae(
         nfeats=263,
         quantizer="ema_reset",
@@ -224,8 +270,33 @@ def load_vqvae(checkpoint_path: Path, device: torch.device) -> tuple[VQVae, dict
         )
     model.to(device)
     model.eval()
+    calibration_meta: dict[str, Any] = {
+        "root_velocity_calibration_domain": calibration_domain,
+        "root_velocity_calibration_applied": False,
+    }
+    scale_logit = state.get("root_velocity_scale_logit")
+    if scale_logit is not None:
+        bounds = state.get(
+            "root_velocity_scale_bounds",
+            torch.tensor([0.8, 1.3], dtype=torch.float32),
+        )
+        scale = bounds[0] + (bounds[1] - bounds[0]) * torch.sigmoid(scale_logit)
+        calibration_meta.update({
+            "root_velocity_scale": [float(v) for v in scale.detach().cpu().tolist()],
+            "root_velocity_scale_bounds": [float(v) for v in bounds.detach().cpu().tolist()],
+        })
+        if calibration_domain in ("m4human", "all", "*"):
+            model = RootVelocityCalibratedVQVae(
+                model,
+                scale_logit=scale_logit,
+                bounds=bounds,
+                bias=state.get("root_velocity_bias"),
+            ).to(device)
+            model.eval()
+            calibration_meta["root_velocity_calibration_applied"] = True
     return model, {
         "checkpoint": str(checkpoint_path),
         "epoch": checkpoint.get("epoch"),
         "global_step": checkpoint.get("global_step"),
+        **calibration_meta,
     }

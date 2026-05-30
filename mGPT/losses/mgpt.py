@@ -20,6 +20,8 @@ class GPTLosses(BaseLosses):
         # Save parameters
         self.stage = stage
         recons_loss = cfg.LOSS.ABLATION.RECONS_LOSS
+        self.speed_fps = float(cfg.LOSS.get("SPEED_FPS", 20.0))
+        self.speed_domain = cfg.LOSS.get("SPEED_DOMAIN", "")
 
         # Define losses
         losses = []
@@ -36,6 +38,18 @@ class GPTLosses(BaseLosses):
                 losses.append("recons_height")
                 params["recons_height"] = cfg.LOSS.LAMBDA_ROOT_HEIGHT
 
+            if cfg.LOSS.get("LAMBDA_TRAJ_FINAL", 0.0) != 0.0:
+                losses.append("recons_trajfinal")
+                params["recons_trajfinal"] = cfg.LOSS.LAMBDA_TRAJ_FINAL
+
+            if cfg.LOSS.get("LAMBDA_TRAJ_PATH", 0.0) != 0.0:
+                losses.append("recons_trajpath")
+                params["recons_trajpath"] = cfg.LOSS.LAMBDA_TRAJ_PATH
+
+            if cfg.LOSS.get("LAMBDA_SPEED_MEAN", 0.0) != 0.0:
+                losses.append("recons_speedmean")
+                params["recons_speedmean"] = cfg.LOSS.LAMBDA_SPEED_MEAN
+
             losses.append("recons_velocity")
             params['recons_velocity'] = cfg.LOSS.LAMBDA_VELOCITY
 
@@ -48,7 +62,9 @@ class GPTLosses(BaseLosses):
         # Define loss functions & weights
         losses_func = {}
         for loss in losses:
-            if loss.split('_')[0] == 'recons':
+            if loss in ["recons_trajfinal", "recons_trajpath", "recons_speedmean"]:
+                losses_func[loss] = nn.L1Loss
+            elif loss.split('_')[0] == 'recons':
                 if recons_loss == "l1":
                     losses_func[loss] = nn.L1Loss
                 elif recons_loss == "l2":
@@ -88,6 +104,66 @@ class GPTLosses(BaseLosses):
                     rs_set["m_rst"][..., 3:4],
                     rs_set["m_ref"][..., 3:4],
                 )
+            if "recons_trajfinal" in self._params:
+                ref_disp = (
+                    rs_set["root_ref"][..., -1, [0, 2]] -
+                    rs_set["root_ref"][..., 0, [0, 2]]
+                )
+                rst_disp = (
+                    rs_set["root_rst"][..., -1, [0, 2]] -
+                    rs_set["root_rst"][..., 0, [0, 2]]
+                )
+                total += self._update_loss("recons_trajfinal", rst_disp, ref_disp)
+            if "recons_trajpath" in self._params:
+                ref_steps = torch.linalg.norm(
+                    rs_set["root_ref"][..., 1:, [0, 2]] -
+                    rs_set["root_ref"][..., :-1, [0, 2]],
+                    dim=-1,
+                )
+                rst_steps = torch.linalg.norm(
+                    rs_set["root_rst"][..., 1:, [0, 2]] -
+                    rs_set["root_rst"][..., :-1, [0, 2]],
+                    dim=-1,
+                )
+                total += self._update_loss(
+                    "recons_trajpath",
+                    rst_steps.sum(dim=-1),
+                    ref_steps.sum(dim=-1),
+                )
+            if "recons_speedmean" in self._params:
+                root_ref = rs_set["root_ref"]
+                root_rst = rs_set["root_rst"]
+                if self.speed_domain:
+                    domains = rs_set.get("domain")
+                    if domains is None:
+                        root_ref = None
+                        root_rst = None
+                    else:
+                        mask = torch.tensor(
+                            [domain == self.speed_domain for domain in domains],
+                            device=root_ref.device,
+                            dtype=torch.bool,
+                        )
+                        if bool(mask.any()):
+                            root_ref = root_ref[mask]
+                            root_rst = root_rst[mask]
+                        else:
+                            root_ref = None
+                            root_rst = None
+                if root_ref is not None and root_rst is not None:
+                    ref_speed = torch.linalg.norm(
+                        root_ref[..., 1:, [0, 2]] - root_ref[..., :-1, [0, 2]],
+                        dim=-1,
+                    ) * self.speed_fps
+                    rst_speed = torch.linalg.norm(
+                        root_rst[..., 1:, [0, 2]] - root_rst[..., :-1, [0, 2]],
+                        dim=-1,
+                    ) * self.speed_fps
+                    total += self._update_loss(
+                        "recons_speedmean",
+                        rst_speed.mean().reshape(1),
+                        ref_speed.mean().reshape(1),
+                    )
             if nfeats in [263, 135 + 263]:
                 if nfeats == 135 + 263:
                     vel_start = 135 + 4

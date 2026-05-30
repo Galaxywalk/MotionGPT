@@ -68,6 +68,12 @@ def humanml3d_collate(batch):
     if len(notnone_batches[0]) == 9:
         adapted_batch.update({"tasks": [b[8] for b in notnone_batches]})
 
+    # Mixed VQ training can attach a lightweight domain label as the final
+    # tuple item. Evaluation samples also use index 7 for captions, so only
+    # consume this marker for motion-only VQ batches.
+    if notnone_batches[0][0] is None and len(notnone_batches[0]) >= 8:
+        adapted_batch.update({"domain": [b[-1] for b in notnone_batches]})
+
     return adapted_batch
 
 
