@@ -165,18 +165,119 @@ class BottleneckRootBranch(nn.Module):
         return self.decode(self.encode(root_norm, local_norm), local_norm)
 
 
+class ResidualTCNBlock(nn.Module):
+    def __init__(self, width: int, dilation: int = 1, dropout: float = 0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(width, width, 3, padding=dilation, dilation=dilation),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Conv1d(width, width, 3, padding=dilation, dilation=dilation),
+        )
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(x + self.net(x))
+
+
+def _make_tcn(width: int, depth: int, dropout: float = 0.0) -> nn.Sequential:
+    blocks = []
+    for idx in range(depth):
+        dilation = 2 ** (idx % 4)
+        blocks.append(ResidualTCNBlock(width, dilation=dilation, dropout=dropout))
+    return nn.Sequential(*blocks)
+
+
+class StrongBottleneckRootBranch(nn.Module):
+    def __init__(
+        self,
+        local_dim: int = LOCAL_DIM,
+        root_dim: int = ROOT_DIM,
+        width: int = 256,
+        latent_width: int = 256,
+        downsample_layers: int = 2,
+        tcn_depth: int = 4,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        if downsample_layers < 1:
+            raise ValueError("downsample_layers must be >= 1")
+        self.downsample_layers = downsample_layers
+        self.local_proj = nn.Sequential(
+            nn.Conv1d(local_dim, width, 1),
+            nn.GELU(),
+            _make_tcn(width, max(tcn_depth // 2, 1), dropout=dropout),
+        )
+        self.root_stem = nn.Sequential(
+            nn.Conv1d(root_dim + width, width, 3, padding=1),
+            nn.GELU(),
+            _make_tcn(width, tcn_depth, dropout=dropout),
+        )
+        downs = []
+        for _ in range(downsample_layers):
+            downs.extend([
+                nn.Conv1d(width, width, 4, stride=2, padding=1),
+                nn.GELU(),
+                _make_tcn(width, max(tcn_depth // 2, 1), dropout=dropout),
+            ])
+        self.down = nn.Sequential(*downs)
+        self.to_latent = nn.Conv1d(width, latent_width, 1)
+        self.latent_tcn = _make_tcn(latent_width, tcn_depth, dropout=dropout)
+        self.from_latent = nn.Conv1d(latent_width, width, 1)
+        self.decoder = nn.Sequential(
+            nn.Conv1d(width + width, width, 3, padding=1),
+            nn.GELU(),
+            _make_tcn(width, tcn_depth, dropout=dropout),
+            nn.Conv1d(width, width, 3, padding=1),
+            nn.GELU(),
+        )
+        self.out = nn.Conv1d(width, root_dim, 1)
+
+    def encode(self, root_norm: torch.Tensor, local_norm: torch.Tensor) -> torch.Tensor:
+        root = root_norm.permute(0, 2, 1)
+        local = local_norm.permute(0, 2, 1)
+        cond = self.local_proj(local)
+        h = self.root_stem(torch.cat([root, cond], dim=1))
+        return self.latent_tcn(self.to_latent(self.down(h)))
+
+    def decode(self, latent: torch.Tensor, local_norm: torch.Tensor) -> torch.Tensor:
+        local = local_norm.permute(0, 2, 1)
+        cond = self.local_proj(local)
+        y = F.interpolate(self.from_latent(latent), size=cond.shape[-1], mode="nearest")
+        y = self.decoder(torch.cat([y, cond], dim=1))
+        return self.out(y).permute(0, 2, 1)
+
+    def forward(self, root_norm: torch.Tensor, local_norm: torch.Tensor) -> torch.Tensor:
+        return self.decode(self.encode(root_norm, local_norm), local_norm)
+
+
 def build_root_model(args: argparse.Namespace) -> nn.Module:
     architecture = getattr(args, "architecture", "unet")
     if architecture == "unet":
         return RootBranch(width=args.width, latent_width=args.latent_width)
     if architecture == "bottleneck":
         return BottleneckRootBranch(width=args.width, latent_width=args.latent_width)
+    if architecture == "bottleneck_tcn":
+        return StrongBottleneckRootBranch(
+            width=args.width,
+            latent_width=args.latent_width,
+            downsample_layers=getattr(args, "root_downsample_layers", 2),
+            tcn_depth=getattr(args, "tcn_depth", 4),
+            dropout=getattr(args, "dropout", 0.0),
+        )
     raise ValueError(f"Unsupported root branch architecture: {architecture}")
 
 
 def _recover_root_xz(features: torch.Tensor) -> torch.Tensor:
     _, root = motion_process.recover_root_rot_pos(features)
     return root[..., [0, 2]]
+
+
+def _recover_root_yaw(features: torch.Tensor) -> torch.Tensor:
+    rot_vel = features[..., 0]
+    yaw = torch.zeros_like(rot_vel)
+    yaw[..., 1:] = rot_vel[..., :-1]
+    return torch.cumsum(yaw, dim=-1)
 
 
 def _root_losses(
@@ -200,6 +301,24 @@ def _root_losses(
     ref_steps_vec = ref_xz[:, 1:] - ref_xz[:, :-1]
     global_vel = F.smooth_l1_loss(pred_steps_vec, ref_steps_vec)
     final = F.smooth_l1_loss(pred_xz[:, -1] - pred_xz[:, 0], ref_xz[:, -1] - ref_xz[:, 0])
+    multi_scale = pred_xz.new_zeros(())
+    if args.lambda_multiscale > 0:
+        length = pred_xz.shape[1]
+        indices = sorted({
+            max(min(int(round((length - 1) * ratio)), length - 1), 1)
+            for ratio in (0.25, 0.5, 0.75, 1.0)
+            if length > 1
+        })
+        if indices:
+            pred_disp = pred_xz[:, indices] - pred_xz[:, :1]
+            ref_disp = ref_xz[:, indices] - ref_xz[:, :1]
+            multi_scale = F.smooth_l1_loss(pred_disp, ref_disp)
+    yaw_integral = pred_xz.new_zeros(())
+    if args.lambda_yaw_integral > 0:
+        pred_yaw = _recover_root_yaw(pred_features)
+        ref_yaw = _recover_root_yaw(ref_features)
+        yaw_diff = torch.atan2(torch.sin(pred_yaw - ref_yaw), torch.cos(pred_yaw - ref_yaw))
+        yaw_integral = F.smooth_l1_loss(yaw_diff, torch.zeros_like(yaw_diff))
     path = F.smooth_l1_loss(
         torch.linalg.norm(pred_steps_vec, dim=-1).sum(dim=-1),
         torch.linalg.norm(ref_steps_vec, dim=-1).sum(dim=-1),
@@ -214,6 +333,8 @@ def _root_losses(
         + args.lambda_global_pos * global_pos
         + args.lambda_global_vel * global_vel
         + args.lambda_final * final
+        + args.lambda_multiscale * multi_scale
+        + args.lambda_yaw_integral * yaw_integral
         + args.lambda_path * path
         + args.lambda_smooth * smooth
     )
@@ -226,6 +347,8 @@ def _root_losses(
         "global_pos": global_pos.detach(),
         "global_vel": global_vel.detach(),
         "final": final.detach(),
+        "multi_scale": multi_scale.detach(),
+        "yaw_integral": yaw_integral.detach(),
         "path": path.detach(),
         "smooth": smooth.detach(),
     }
@@ -359,7 +482,8 @@ def train(args: argparse.Namespace) -> dict[str, Any]:
         print(
             f"epoch {epoch}: loss={summary['loss']:.6f} control={summary['control']:.6f} "
             f"vel={summary['velocity']:.6f} global={summary['global_pos']:.6f} "
-            f"final={summary['final']:.6f} path={summary['path']:.6f}"
+            f"final={summary['final']:.6f} multi={summary['multi_scale']:.6f} "
+            f"path={summary['path']:.6f}"
         )
         clean_args = {key: value for key, value in vars(args).items() if key != "func"}
         payload = {
@@ -557,7 +681,10 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--grad-clip", type=float, default=1.0)
     train_p.add_argument("--width", type=int, default=128)
     train_p.add_argument("--latent-width", type=int, default=128)
-    train_p.add_argument("--architecture", choices=("unet", "bottleneck"), default="unet")
+    train_p.add_argument("--architecture", choices=("unet", "bottleneck", "bottleneck_tcn"), default="unet")
+    train_p.add_argument("--root-downsample-layers", type=int, default=2)
+    train_p.add_argument("--tcn-depth", type=int, default=4)
+    train_p.add_argument("--dropout", type=float, default=0.0)
     train_p.add_argument("--lambda-control", type=float, default=1.0)
     train_p.add_argument("--lambda-yaw", type=float, default=0.1)
     train_p.add_argument("--lambda-velocity", type=float, default=0.5)
@@ -565,6 +692,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument("--lambda-global-pos", type=float, default=10.0)
     train_p.add_argument("--lambda-global-vel", type=float, default=10.0)
     train_p.add_argument("--lambda-final", type=float, default=20.0)
+    train_p.add_argument("--lambda-multiscale", type=float, default=0.0)
+    train_p.add_argument("--lambda-yaw-integral", type=float, default=0.0)
     train_p.add_argument("--lambda-path", type=float, default=10.0)
     train_p.add_argument("--lambda-smooth", type=float, default=0.1)
     train_p.set_defaults(func=train)

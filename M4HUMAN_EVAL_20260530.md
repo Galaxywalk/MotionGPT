@@ -613,3 +613,100 @@ No-skip bottleneck variant:
   return to single-stream loss tuning. Good candidates are a deeper temporal
   bottleneck decoder, integrated-yaw loss, endpoint-conditioned latent loss, or
   a lightweight Transformer root branch while keeping the local VQ frozen.
+
+## Root Bottleneck Optimization R1-R3
+
+This pass optimizes the no-skip root latent, not the U-Net skip upper bound.
+The code adds a stronger no-skip TCN root branch:
+
+```text
+root controls + local VQ reconstruction
+  -> dilated residual TCN encoder
+  -> continuous root latent
+  -> dilated residual TCN decoder + local condition
+  -> root controls
+```
+
+It also adds two optional trajectory losses:
+
+- `L_multiscale`: displacement vector loss at 25%, 50%, 75%, and 100% of the
+  window.
+- `L_yaw_integral`: wrapped integrated-yaw loss, implemented but not enabled in
+  R1-R3.
+
+### Output Paths
+
+- R1 stronger TCN, 4x root downsample:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_tcn_v1`
+- R2 stronger TCN + multiscale loss, 4x root downsample:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_tcn_multiscale_v1`
+- R3 stronger TCN + multiscale loss, 2x root downsample:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_tcn_multiscale_ds1_v1`
+
+### Training Setup
+
+Common setup:
+
+- Init: frozen local VQ checkpoint
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt`
+- Trainable: root branch only.
+- Data: M4Human train split.
+- Training: 50 epochs, 100 steps/epoch, batch size 256.
+- Window sampling: `[64, 128, 196]` with weights `[0.25, 0.25, 0.50]`.
+- Root branch: `architecture=bottleneck_tcn`, `width=256`,
+  `latent_width=256`, `tcn_depth=4`.
+
+Experiment differences:
+
+| experiment | root downsample | multiscale weight |
+| --- | ---: | ---: |
+| R1 | 4x | 0 |
+| R2 | 4x | 20 |
+| R3 | 2x | 20 |
+
+### Results
+
+| experiment | split/window | MPJPE / root-align / gap | root xz mean | final xz | path error | speed bias |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| old bottleneck | test 196 | 77.232 / 48.804 / 28.428 mm | 46.711 mm | 72.039 mm | -0.0182 m | -1.950 mm/s |
+| R1 TCN 4x | test 64 | 57.305 / 49.218 / 8.087 mm | 16.114 mm | 22.353 mm | -0.0023 m | -0.733 mm/s |
+| R1 TCN 4x | test 128 | 59.760 / 48.614 / 11.146 mm | 21.691 mm | 32.217 mm | -0.0049 m | -0.793 mm/s |
+| R1 TCN 4x | test 196 | 63.412 / 48.570 / 14.843 mm | 27.556 mm | 41.694 mm | -0.0078 m | -0.831 mm/s |
+| R1 TCN 4x | val 196 | 53.594 / 42.786 / 10.808 mm | 22.401 mm | 33.398 mm | -0.0112 m | -1.164 mm/s |
+| R2 TCN 4x + multiscale | test 64 | 54.501 / 49.033 / 5.468 mm | 8.863 mm | 11.769 mm | -0.0004 m | -0.140 mm/s |
+| R2 TCN 4x + multiscale | test 128 | 55.219 / 48.390 / 6.829 mm | 12.023 mm | 17.062 mm | -0.0004 m | -0.071 mm/s |
+| R2 TCN 4x + multiscale | test 196 | 56.663 / 48.304 / 8.360 mm | 15.021 mm | 20.534 mm | -0.0007 m | -0.077 mm/s |
+| R2 TCN 4x + multiscale | val 196 | 48.771 / 42.627 / 6.144 mm | 12.402 mm | 17.822 mm | 0.0002 m | 0.018 mm/s |
+| R3 TCN 2x + multiscale | test 64 | 53.793 / 49.006 / 4.788 mm | 5.917 mm | 7.845 mm | -0.0002 m | -0.061 mm/s |
+| R3 TCN 2x + multiscale | test 128 | 54.040 / 48.348 / 5.692 mm | 8.278 mm | 11.805 mm | -0.0001 m | -0.015 mm/s |
+| R3 TCN 2x + multiscale | test 196 | 55.171 / 48.243 / 6.928 mm | 10.981 mm | 15.198 mm | -0.0002 m | -0.023 mm/s |
+| R3 TCN 2x + multiscale | val 196 | 47.649 / 42.522 / 5.127 mm | 8.900 mm | 13.066 mm | 0.0051 m | 0.530 mm/s |
+
+### Interpretation
+
+- R1 confirms that model capacity matters. A stronger no-skip TCN improves
+  test196 from `77.23 / 48.80 / 28.43 mm` to
+  `63.41 / 48.57 / 14.84 mm`.
+- R2 confirms that low-frequency displacement supervision is the right loss.
+  With the same 4x latent rate, multiscale displacement reduces test196 gap
+  from `14.84 mm` to `8.36 mm` and final xz error from `41.69 mm` to
+  `20.53 mm`.
+- R3 confirms that root trajectory benefits from higher temporal resolution.
+  Moving from 4x to 2x root downsample further improves test196 to
+  `55.17 / 48.24 / 6.93 mm`.
+- The remaining root error is now small compared with local reconstruction:
+  R3 test196 root xz mean error is `10.98 mm`, final xz error is `15.20 mm`,
+  and speed bias is effectively zero.
+- R3 is a strict no-skip bottleneck result but is already close to the previous
+  U-Net skip upper bound. This means the root/local factorized tokenizer is no
+  longer just a promising direction; it is currently the best M4Human
+  reconstruction path in this repo.
+
+Recommended next steps:
+
+- Keep R3 as the current factorized root checkpoint.
+- Add HumanML3D factorized cache and evaluate whether the same root/local
+  tokenizer preserves HumanML3D metrics.
+- Only after mixed-domain validation, consider root latent compression or
+  discretization. The current continuous root branch should remain the quality
+  reference.
