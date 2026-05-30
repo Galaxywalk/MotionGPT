@@ -1,0 +1,65 @@
+NAME: VQVAE_HumanML3D_M4Human20Hz_mix30_bs256_finetune
+ACCELERATOR: 'gpu'
+NUM_NODES: 1
+DEVICE: [0, 1, 2, 3]
+
+TRAIN:
+  STAGE: vae
+  NUM_WORKERS: 8
+  BATCH_SIZE: 64
+  END_EPOCH: 500
+  PRETRAINED_VAE: experiments/mgpt/VQVAE_HumanML3D_H200_2000e_bs256_eval100/checkpoints/min-MPJPEep=0.ckpt
+  PRETRAINED: ''
+  RESUME: ''
+  BENCHMARK: True
+  OPTIM:
+    target: AdamW
+    params:
+      lr: 1e-4
+      betas: [0.9, 0.99]
+      weight_decay: 0.0
+
+EVAL:
+  BATCH_SIZE: 64
+  SPLIT: test
+
+TEST:
+  CHECKPOINTS: checkpoints/MotionGPT-base/motiongpt_s3_h3d.tar
+  SPLIT: test
+  BATCH_SIZE: 64
+
+DATASET:
+  target: mGPT.data.MixedHumanML3DM4Human.MixedHumanML3DM4HumanDataModule
+  M4HUMAN:
+    CACHE_ROOT: /cpfs01/liangbo/data/MotionGPT/m4human_cache/v2_xz-y_param_joints_m4ref_20hz
+    TRAIN_SUBSET: train
+    MIX_RATIO: 0.3
+    WINDOW_SIZE: 64
+    MIN_MOTION_LEN: 40
+    MAX_SEQUENCES: 0
+
+METRIC:
+  TYPE: ['TM2TMetrics', 'MRMetrics']
+
+LOSS:
+  LAMBDA_FEATURE: 1.0
+  LAMBDA_VELOCITY: 0.5
+  LAMBDA_COMMIT: 0.02
+  LAMBDA_CLS: 1.0
+  ABLATION:
+    RECONS_LOSS: 'l1_smooth'
+
+model:
+  target: mGPT.models.mgpt.MotionGPT
+  params:
+    condition: 'text'
+    task: 't2m'
+    lm: ${lm.default}
+    motion_vae: ${vq.default}
+
+LOGGER:
+  TYPE: ['tensorboard']
+  VAL_EVERY_STEPS: 50
+  WANDB:
+    params:
+      project: null

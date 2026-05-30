@@ -28,6 +28,14 @@ class GPTLosses(BaseLosses):
             losses.append("recons_feature")
             params['recons_feature'] = cfg.LOSS.LAMBDA_FEATURE
 
+            if cfg.LOSS.get("LAMBDA_ROOT", 0.0) != 0.0:
+                losses.append("recons_root")
+                params["recons_root"] = cfg.LOSS.LAMBDA_ROOT
+
+            if cfg.LOSS.get("LAMBDA_ROOT_HEIGHT", 0.0) != 0.0:
+                losses.append("recons_height")
+                params["recons_height"] = cfg.LOSS.LAMBDA_ROOT_HEIGHT
+
             losses.append("recons_velocity")
             params['recons_velocity'] = cfg.LOSS.LAMBDA_VELOCITY
 
@@ -68,6 +76,18 @@ class GPTLosses(BaseLosses):
                                        rs_set['m_ref'])
             # total += self._update_loss("recons_joints", rs_set['joints_rst'], rs_set['joints_ref'])
             nfeats = rs_set['m_rst'].shape[-1]
+            if "recons_root" in self._params:
+                total += self._update_loss(
+                    "recons_root",
+                    rs_set["m_rst"][..., :3],
+                    rs_set["m_ref"][..., :3],
+                )
+            if "recons_height" in self._params:
+                total += self._update_loss(
+                    "recons_height",
+                    rs_set["m_rst"][..., 3:4],
+                    rs_set["m_ref"][..., 3:4],
+                )
             if nfeats in [263, 135 + 263]:
                 if nfeats == 135 + 263:
                     vel_start = 135 + 4

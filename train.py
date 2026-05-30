@@ -70,6 +70,7 @@ def main():
         benchmark=cfg.TRAIN.get("BENCHMARK", False),
         deterministic=cfg.TRAIN.get("DETERMINISTIC", False),
         accumulate_grad_batches=cfg.TRAIN.get("ACCUMULATE_GRAD_BATCHES", 1),
+        use_distributed_sampler=cfg.TRAIN.get("USE_DISTRIBUTED_SAMPLER", True),
     )
     logger.info("Trainer initialized")
 

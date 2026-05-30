@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local datasets, checkpoints, dependencies, and experiment outputs.
+datasets
+deps
+checkpoints
+experiments/
+lightning_logs/
+
+# Runtime scratch directories from wandb, multiprocessing, and temp jobs.
+tmp*/
+pymp-*/
+wandb/
