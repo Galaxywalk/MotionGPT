@@ -95,3 +95,62 @@ Recommended next direction: keep Exp3 as the best balanced checkpoint for now.
 If continuing, try a smaller M4Human speed weight (`0.25` or `0.5`) and a more
 direction-aware endpoint/displacement objective, rather than further increasing
 path length or global speed alone.
+
+## Exp8/Exp9 Root Step Loss
+
+This pass adds M4Human-domain-only trajectory losses and a direction-sensitive
+root step loss. The new config entry `LOSS.TRAJ_DOMAIN` gates
+`LAMBDA_TRAJ_FINAL`, `LAMBDA_TRAJ_PATH`, and `LAMBDA_TRAJ_STEP` by domain.
+`LOSS.LAMBDA_TRAJ_STEP` computes an L1 loss between recovered global root x/z
+step vectors.
+
+### Checkpoints
+
+- Exp8a M4Human-domain step loss 0.005:
+  `experiments/mgpt/VQVAE_HumanML3D_M4Human20Hz_mix70_lr2e5_multilen_path_step005_finetune/checkpoints/epoch=99.ckpt`
+- Exp8b step loss 0.01 config exists, but was not run because Exp8a was only a
+  weak positive result:
+  `configs/config_h3d_m4human_mix70_multilen_path_step010_stage1.yaml`
+
+### Output Paths
+
+- Exp8a eval:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/mix70_multilen_path_step005_epoch99`
+- Exp3 root analysis rerun with the new step-vector metric:
+  `/cpfs01/liangbo/data/MotionGPT/length_drift_analysis/mix70_multilen_path_epoch649/root_analysis_with_step`
+
+### Results
+
+| experiment | M4Human test 196 MPJPE / root-align / gap | speed bias | path error | final xz error | step L1 | HumanML3D official FID / MPJPE |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Exp3 path/final | 101.077 / 52.429 / 48.648 mm | -7.257 mm/s | -0.0673 m | 118.717 mm | 1.865 mm | 0.182322 / 48.643 mm |
+| Exp8a M4-only final/path/step | 100.858 / 52.303 / 48.555 mm | -7.982 mm/s | -0.0742 m | 118.300 mm | 1.848 mm | 0.194567 / 48.481 mm |
+
+Exp8a M4Human length breakdown:
+
+| split/window | MPJPE / root-align / gap |
+| --- | ---: |
+| test 64 | 71.943 / 50.936 / 21.006 mm |
+| test 128 | 86.396 / 51.476 / 34.920 mm |
+| test 196 | 100.858 / 52.303 / 48.555 mm |
+| all 196 | 68.354 / 31.806 / 36.548 mm |
+
+### Interpretation
+
+- Exp8a barely improves full MPJPE and gap over Exp3. The new step-vector metric
+  also moves only slightly, from 1.865 mm to 1.848 mm.
+- HumanML3D official FID remains acceptable at 0.195, but is worse than Exp3's
+  0.182. The M4Human-only gating worked in the sense that it avoided a large
+  HumanML3D regression, but the trajectory objective was too weak to materially
+  fix root drift.
+- Because Exp8a did not show a clear gain, Exp8b (`LAMBDA_TRAJ_STEP=0.01`) was
+  not run. Increasing this weight is more likely to trade off feature balance
+  than to solve the remaining drift.
+
+### Bug Checks
+
+- `python -m py_compile mGPT/losses/mgpt.py src/motiongpt_m4human/analyze_root_reconstruction.py`
+- Synthetic loss checks for mixed, HumanML3D-only, and missing-domain batches all
+  produced finite losses.
+- Real dataloader smoke checks confirmed M4Human batches log
+  `recons_trajstep`, while HumanML3D-only batches skip it without NaNs.

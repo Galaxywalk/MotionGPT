@@ -142,6 +142,8 @@ class RootReconstructionStats:
         self.window_ref_path: list[float] = []
         self.window_recon_path: list[float] = []
         self.window_path_error: list[float] = []
+        self.root_step_l1_error: list[np.ndarray] = []
+        self.window_step_l1_error: list[float] = []
 
     def update(self, batch: list[dict[str, Any]], features: torch.Tensor, recon: torch.Tensor) -> None:
         ref_np = features.detach().cpu().numpy()
@@ -174,8 +176,11 @@ class RootReconstructionStats:
         ref_xz = ref_root[..., [0, 2]].detach().cpu().numpy()
         recon_xz = recon_root[..., [0, 2]].detach().cpu().numpy()
         for i, item in enumerate(batch):
-            ref_steps = np.linalg.norm(np.diff(ref_xz[i], axis=0), axis=1)
-            recon_steps = np.linalg.norm(np.diff(recon_xz[i], axis=0), axis=1)
+            ref_delta = np.diff(ref_xz[i], axis=0)
+            recon_delta = np.diff(recon_xz[i], axis=0)
+            ref_steps = np.linalg.norm(ref_delta, axis=1)
+            recon_steps = np.linalg.norm(recon_delta, axis=1)
+            step_l1 = np.abs(recon_delta - ref_delta).mean(axis=1)
             ref_path = float(ref_steps.sum())
             recon_path = float(recon_steps.sum())
             self.window_final_xz_error.append(float(xz_err[i, -1]))
@@ -184,6 +189,8 @@ class RootReconstructionStats:
             self.window_ref_path.append(ref_path)
             self.window_recon_path.append(recon_path)
             self.window_path_error.append(recon_path - ref_path)
+            self.root_step_l1_error.append(step_l1.reshape(-1))
+            self.window_step_l1_error.append(float(step_l1.mean()))
             self.window_count += 1
             self.frame_count += int(ref_np.shape[1])
             if len(self.example_windows) < 5:
@@ -203,6 +210,7 @@ class RootReconstructionStats:
         speed_err = cat(self.speed_errors)
         xz_err = cat(self.root_xz_error)
         xyz_err = cat(self.root_xyz_error)
+        step_l1 = cat(self.root_step_l1_error)
 
         yaw_deg_per_s = yaw * fps * 180.0 / math.pi
         root_y_mm = root_y * 1000.0
@@ -235,6 +243,8 @@ class RootReconstructionStats:
             "window_ref_path_m": _quantiles(np.array(self.window_ref_path)),
             "window_recon_path_m": _quantiles(np.array(self.window_recon_path)),
             "window_path_error_m": _quantiles(np.array(self.window_path_error)),
+            "root_step_l1_error_mm": _quantiles(step_l1 * 1000.0),
+            "window_step_l1_error_mm": _quantiles(np.array(self.window_step_l1_error) * 1000.0),
         }
 
 

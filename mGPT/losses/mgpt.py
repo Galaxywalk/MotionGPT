@@ -22,6 +22,7 @@ class GPTLosses(BaseLosses):
         recons_loss = cfg.LOSS.ABLATION.RECONS_LOSS
         self.speed_fps = float(cfg.LOSS.get("SPEED_FPS", 20.0))
         self.speed_domain = cfg.LOSS.get("SPEED_DOMAIN", "")
+        self.traj_domain = cfg.LOSS.get("TRAJ_DOMAIN", "")
 
         # Define losses
         losses = []
@@ -46,6 +47,10 @@ class GPTLosses(BaseLosses):
                 losses.append("recons_trajpath")
                 params["recons_trajpath"] = cfg.LOSS.LAMBDA_TRAJ_PATH
 
+            if cfg.LOSS.get("LAMBDA_TRAJ_STEP", 0.0) != 0.0:
+                losses.append("recons_trajstep")
+                params["recons_trajstep"] = cfg.LOSS.LAMBDA_TRAJ_STEP
+
             if cfg.LOSS.get("LAMBDA_SPEED_MEAN", 0.0) != 0.0:
                 losses.append("recons_speedmean")
                 params["recons_speedmean"] = cfg.LOSS.LAMBDA_SPEED_MEAN
@@ -62,7 +67,12 @@ class GPTLosses(BaseLosses):
         # Define loss functions & weights
         losses_func = {}
         for loss in losses:
-            if loss in ["recons_trajfinal", "recons_trajpath", "recons_speedmean"]:
+            if loss in [
+                    "recons_trajfinal",
+                    "recons_trajpath",
+                    "recons_trajstep",
+                    "recons_speedmean",
+            ]:
                 losses_func[loss] = nn.L1Loss
             elif loss.split('_')[0] == 'recons':
                 if recons_loss == "l1":
@@ -82,6 +92,25 @@ class GPTLosses(BaseLosses):
 
         super().__init__(cfg, losses, params, losses_func, num_joints,
                          **kwargs)
+
+    def _select_domain_roots(self, rs_set, domain):
+        root_ref = rs_set["root_ref"]
+        root_rst = rs_set["root_rst"]
+        if not domain or domain in ("all", "*"):
+            return root_ref, root_rst
+
+        domains = rs_set.get("domain")
+        if domains is None:
+            return None, None
+
+        mask = torch.tensor(
+            [item == domain for item in domains],
+            device=root_ref.device,
+            dtype=torch.bool,
+        )
+        if not bool(mask.any()):
+            return None, None
+        return root_ref[mask], root_rst[mask]
 
     def update(self, rs_set):
         '''Update the losses'''
@@ -104,25 +133,27 @@ class GPTLosses(BaseLosses):
                     rs_set["m_rst"][..., 3:4],
                     rs_set["m_ref"][..., 3:4],
                 )
-            if "recons_trajfinal" in self._params:
+            root_ref, root_rst = self._select_domain_roots(
+                rs_set, self.traj_domain)
+            if "recons_trajfinal" in self._params and root_ref is not None:
                 ref_disp = (
-                    rs_set["root_ref"][..., -1, [0, 2]] -
-                    rs_set["root_ref"][..., 0, [0, 2]]
+                    root_ref[..., -1, [0, 2]] -
+                    root_ref[..., 0, [0, 2]]
                 )
                 rst_disp = (
-                    rs_set["root_rst"][..., -1, [0, 2]] -
-                    rs_set["root_rst"][..., 0, [0, 2]]
+                    root_rst[..., -1, [0, 2]] -
+                    root_rst[..., 0, [0, 2]]
                 )
                 total += self._update_loss("recons_trajfinal", rst_disp, ref_disp)
-            if "recons_trajpath" in self._params:
+            if "recons_trajpath" in self._params and root_ref is not None:
                 ref_steps = torch.linalg.norm(
-                    rs_set["root_ref"][..., 1:, [0, 2]] -
-                    rs_set["root_ref"][..., :-1, [0, 2]],
+                    root_ref[..., 1:, [0, 2]] -
+                    root_ref[..., :-1, [0, 2]],
                     dim=-1,
                 )
                 rst_steps = torch.linalg.norm(
-                    rs_set["root_rst"][..., 1:, [0, 2]] -
-                    rs_set["root_rst"][..., :-1, [0, 2]],
+                    root_rst[..., 1:, [0, 2]] -
+                    root_rst[..., :-1, [0, 2]],
                     dim=-1,
                 )
                 total += self._update_loss(
@@ -130,26 +161,20 @@ class GPTLosses(BaseLosses):
                     rst_steps.sum(dim=-1),
                     ref_steps.sum(dim=-1),
                 )
+            if "recons_trajstep" in self._params and root_ref is not None:
+                ref_delta = (
+                    root_ref[..., 1:, [0, 2]] -
+                    root_ref[..., :-1, [0, 2]]
+                )
+                rst_delta = (
+                    root_rst[..., 1:, [0, 2]] -
+                    root_rst[..., :-1, [0, 2]]
+                )
+                total += self._update_loss("recons_trajstep", rst_delta,
+                                           ref_delta)
             if "recons_speedmean" in self._params:
-                root_ref = rs_set["root_ref"]
-                root_rst = rs_set["root_rst"]
-                if self.speed_domain:
-                    domains = rs_set.get("domain")
-                    if domains is None:
-                        root_ref = None
-                        root_rst = None
-                    else:
-                        mask = torch.tensor(
-                            [domain == self.speed_domain for domain in domains],
-                            device=root_ref.device,
-                            dtype=torch.bool,
-                        )
-                        if bool(mask.any()):
-                            root_ref = root_ref[mask]
-                            root_rst = root_rst[mask]
-                        else:
-                            root_ref = None
-                            root_rst = None
+                root_ref, root_rst = self._select_domain_roots(
+                    rs_set, self.speed_domain)
                 if root_ref is not None and root_rst is not None:
                     ref_speed = torch.linalg.norm(
                         root_ref[..., 1:, [0, 2]] - root_ref[..., :-1, [0, 2]],
