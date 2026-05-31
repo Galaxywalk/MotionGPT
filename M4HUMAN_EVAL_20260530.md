@@ -1051,3 +1051,75 @@ Recommended next full-tokenizer eval configs:
 | balanced | `chunk=16,K=2,vocab=1024,depth=4` | 52 |
 | balanced/high-quality | `chunk=32,K=2,vocab=512,depth=8` | 56 |
 | high-quality | `chunk=16,K=2,vocab=512,depth=8` | 104 |
+
+## Full Local VQ + Root-FAST RVQ Eval
+
+This pass evaluates the actual factorized tokenizer reconstruction:
+
+```text
+local body: local VQ reconstruction
+root:       Root-FAST RVQ reconstruction
+```
+
+This is different from the earlier Root-FAST RVQ sweep, which used GT local pose
+and measured only root-codec error.
+
+Code:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_full_eval.py
+```
+
+Outputs:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_full_eval_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_full_eval_v1/combined_summary.json
+```
+
+We evaluated two local VQ checkpoints:
+
+```text
+local_v1:
+  /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt
+scratch_full:
+  /cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1/checkpoints/best.pt
+```
+
+### Test196 Results
+
+| local ckpt | root setting | root tokens | total tokens | MPJPE | root-align | gap | local-only | root-only |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| local_v1 | aggressive28 | 28 | 74.99 | 67.96 mm | 54.39 mm | 13.57 mm | 51.17 mm | 35.12 mm |
+| local_v1 | balanced52 | 52 | 98.99 | 60.41 mm | 52.55 mm | 7.86 mm | 51.17 mm | 23.23 mm |
+| local_v1 | balanced56 | 56 | 102.99 | 58.53 mm | 53.79 mm | 4.74 mm | 51.17 mm | 20.15 mm |
+| local_v1 | high104 | 104 | 150.99 | 52.97 mm | 52.13 mm | 0.84 mm | 51.17 mm | 7.66 mm |
+| local_v1 | high104_vocab1024 | 104 | 150.99 | 52.79 mm | 52.14 mm | 0.65 mm | 51.17 mm | 7.03 mm |
+| scratch_full | aggressive28 | 28 | 74.99 | 69.85 mm | 56.56 mm | 13.28 mm | 53.56 mm | 35.12 mm |
+| scratch_full | balanced52 | 52 | 98.99 | 62.46 mm | 54.86 mm | 7.60 mm | 53.56 mm | 23.23 mm |
+| scratch_full | balanced56 | 56 | 102.99 | 60.69 mm | 56.05 mm | 4.64 mm | 53.56 mm | 20.15 mm |
+| scratch_full | high104 | 104 | 150.99 | 55.27 mm | 54.50 mm | 0.77 mm | 53.56 mm | 7.66 mm |
+| scratch_full | high104_vocab1024 | 104 | 150.99 | 55.13 mm | 54.50 mm | 0.63 mm | 53.56 mm | 7.03 mm |
+
+### Interpretation
+
+- `local_v1` is better than the full-scratch local checkpoint for full tokenizer
+  reconstruction, matching the earlier local-only result.
+- With `high104_vocab1024`, root gap is only `0.65 mm` on test196 for
+  `local_v1`. This means full MPJPE is now almost entirely local-body error.
+- `high104_vocab1024` reaches `52.79 mm` full MPJPE on test196, close to the
+  `51.17 mm` local-only upper bound for `local_v1`.
+- `balanced56` is a useful compromise: about `103` total tokens/window and
+  `58.53 mm` full MPJPE for `local_v1`.
+- `aggressive28` is too lossy for faithful full reconstruction, but it may still
+  be useful as a compact low-rate condition.
+
+Current recommended tokenizer operating points:
+
+| use case | local ckpt | root setting | total tokens | test196 MPJPE |
+| --- | --- | --- | ---: | ---: |
+| compact | local_v1 | balanced56 | 102.99 | 58.53 mm |
+| high quality | local_v1 | high104_vocab1024 | 150.99 | 52.79 mm |
+
+The next quality bottleneck is local VQ, not root trajectory. Improving the
+local tokenizer should now matter more than further root-token tuning.

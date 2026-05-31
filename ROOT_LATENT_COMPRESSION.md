@@ -485,3 +485,47 @@ Current recommended operating points:
 | `chunk=16,K=2,vocab=1024,depth=4` | 52 | balanced, root-only MPJPE 23.23 mm |
 | `chunk=32,K=2,vocab=512,depth=8` | 56 | balanced/high-quality, root-only MPJPE 20.15 mm |
 | `chunk=16,K=2,vocab=512,depth=8` | 104 | high-quality, root-only MPJPE 7.66 mm |
+
+## Full Tokenizer Check
+
+We then evaluated the complete factorized tokenizer:
+
+```text
+local body -> local VQ reconstruction
+root       -> Root-FAST RVQ reconstruction
+```
+
+Code:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_full_eval.py
+```
+
+Output:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_full_eval_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_full_eval_v1/combined_summary.json
+```
+
+M4Human test196:
+
+| local ckpt | root setting | root tokens | total tokens | MPJPE | root-align | gap |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| local_v1 | balanced56 | 56 | 102.99 | 58.53 mm | 53.79 mm | 4.74 mm |
+| local_v1 | high104_vocab1024 | 104 | 150.99 | 52.79 mm | 52.14 mm | 0.65 mm |
+| scratch_full | balanced56 | 56 | 102.99 | 60.69 mm | 56.05 mm | 4.64 mm |
+| scratch_full | high104_vocab1024 | 104 | 150.99 | 55.13 mm | 54.50 mm | 0.63 mm |
+
+The `local_v1 + high104_vocab1024` setup is the current best token-like full
+reconstruction:
+
+```text
+full MPJPE / root-align / gap: 52.79 / 52.14 / 0.65 mm
+local-only MPJPE:              51.17 mm
+root-only MPJPE:                7.03 mm
+```
+
+This shows that Root-FAST RVQ has effectively solved the compact root-token
+problem at the high-quality setting. The remaining reconstruction bottleneck is
+local VQ.

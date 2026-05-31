@@ -31,6 +31,7 @@ Experiment outputs:
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_scalar_v1
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_product_v1
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_full_eval_v1
 ```
 
 Main docs:
@@ -70,6 +71,15 @@ Root-FAST RVQ, best test196 by token budget:
 | 52 | 16 | 2 | 1024 | 4 | 520 | 23.23 mm | 22.52 mm | 34.07 mm |
 | 56 | 32 | 2 | 512 | 8 | 504 | 20.15 mm | 19.64 mm | 16.55 mm |
 | 104 | 16 | 2 | 1024 | 8 | 1040 | 7.03 mm | 6.76 mm | 7.47 mm |
+
+Full local VQ + Root-FAST RVQ, M4Human test196:
+
+| local ckpt | root setting | root tokens | total tokens | MPJPE | root-align | gap |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| local_v1 | balanced56 | 56 | 102.99 | 58.53 mm | 53.79 mm | 4.74 mm |
+| local_v1 | high104_vocab1024 | 104 | 150.99 | 52.79 mm | 52.14 mm | 0.65 mm |
+| scratch_full | balanced56 | 56 | 102.99 | 60.69 mm | 56.05 mm | 4.64 mm |
+| scratch_full | high104_vocab1024 | 104 | 150.99 | 55.13 mm | 54.50 mm | 0.63 mm |
 
 Scalar quantization, test196:
 
@@ -133,49 +143,40 @@ shared vocab size around 256-1024
    RVQ depth:   2, 4, 8
    ```
 
+3. Full local VQ + Root-FAST RVQ eval.
+
+   The full eval confirms that high-quality Root-FAST RVQ makes root drift
+   negligible in the full tokenizer. For `local_v1 + high104_vocab1024`, test196
+   is:
+
+   ```text
+   full MPJPE / root-align / gap: 52.79 / 52.14 / 0.65 mm
+   ```
+
+   The local-only upper bound for the same checkpoint is `51.17 mm`, so the next
+   reconstruction bottleneck is local body tokenization.
+
 ## Next Compute TODO
 
-1. Full tokenizer evaluation with local VQ + Root-FAST RVQ.
+1. Decide the root-token operating point for downstream prediction.
 
-   Current Root-FAST numbers use GT local pose and measure root codec error.
-   The next full tokenizer evaluation should replace local pose with the trained
-   local VQ decoder and root with the selected Root-FAST RVQ reconstruction.
-
-   Evaluate these root operating points first:
+   Current full-tokenizer interpretation:
 
    ```text
-   aggressive:       chunk=32, K=2, vocab=1024, depth=4  -> 28 root tokens
-   balanced:         chunk=16, K=2, vocab=1024, depth=4  -> 52 root tokens
-   balanced/high-q:  chunk=32, K=2, vocab=512,  depth=8  -> 56 root tokens
-   high-quality:     chunk=16, K=2, vocab=512,  depth=8  -> 104 root tokens
+   28 root tokens:  too lossy for high-quality reconstruction
+   56 root tokens:  compact balanced setting, 58.53 mm test196
+   104 root tokens: high-quality setting, 52.79 mm test196
    ```
 
-   Key metrics:
+2. Improve local body tokenization.
 
-   ```text
-   full MPJPE
-   root-aligned MPJPE
-   root gap
-   root xz mean error
-   final xz error
-   path error
-   speed bias
-   ```
+   Root drift is no longer the dominant error at high104. The next
+   reconstruction work should improve local VQ quality or replace the current
+   local VQ with a stronger local/part-wise tokenizer.
 
-2. Decide the root-token operating point after full local+root eval.
+3. Train token predictors.
 
-   Current root-only interpretation:
-
-   ```text
-   <= 16 tokens: too lossy for faithful root trajectory
-   28 tokens:    plausible aggressive setting
-   52-56 tokens: likely balanced setting
-   104 tokens:   near-scalar quality, longer sequence
-   ```
-
-3. Only after root tokens are stable, train predictors.
-
-   Do not start from mmWave yet. First verify proxy tasks:
+   First verify proxy tasks:
 
    ```text
    local VQ tokens -> Root-FAST tokens

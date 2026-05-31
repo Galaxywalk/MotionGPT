@@ -37,6 +37,7 @@ Code:
 - `src/motiongpt_m4human/factorized/root_branch.py`
 - `src/motiongpt_m4human/factorized/root_fast_codec.py`
 - `src/motiongpt_m4human/factorized/root_fast_quantize.py`
+- `src/motiongpt_m4human/factorized/root_fast_full_eval.py`
 - `src/motiongpt_m4human/factorized/cache.py`
 - `src/motiongpt_m4human/factorized/representation.py`
 - `scripts/train_factorized_scratch_m4human.sh`
@@ -337,6 +338,27 @@ this repo. Its root gap is about `5 mm` on 196-frame test windows, so remaining
 error is dominated by local reconstruction quality rather than accumulated root
 drift.
 
+### Root-FAST Full Tokenizer Eval
+
+The best compact token-like full tokenizer currently uses:
+
+```text
+local body: local_vq_m4human_v1/checkpoints/best.pt
+root:       Root-FAST RVQ, chunk=16, K=2, vocab=1024, depth=8
+```
+
+M4Human test196:
+
+```text
+full MPJPE / root-align / gap: 52.79 / 52.14 / 0.65 mm
+local-only MPJPE:              51.17 mm
+root-only MPJPE:                7.03 mm
+tokens per 196-frame window:  ~47 local + 104 root = 150.99 total
+```
+
+This confirms that the Root-FAST RVQ branch can reduce root drift to almost
+zero in the full tokenizer. The remaining error is dominated by local VQ.
+
 ## Limitations
 
 The current tokenizer is not yet the final mixed-domain training system.
@@ -365,6 +387,11 @@ Known limitations:
    preserves quality but uses many scalar codes, and RVQ is the best token-like
    route so far. Good root-only operating points are `28`, `52-56`, and `104`
    root tokens per 196-frame clip.
-4. Next, evaluate full local-VQ + Root-FAST-RVQ reconstruction. Only after
-   compact root coefficients/tokens work, revisit HumanML3D
-   mixed-domain training and downstream projector design.
+4. For compact full reconstruction, use the `balanced56` setting
+   (`chunk=32,K=2,vocab=512,depth=8`): about `103` total tokens/window and
+   `58.53 mm` test196 MPJPE with `local_v1`.
+5. For high-quality full reconstruction, use `high104_vocab1024`
+   (`chunk=16,K=2,vocab=1024,depth=8`): about `151` total tokens/window and
+   `52.79 mm` test196 MPJPE with `local_v1`.
+6. The next quality bottleneck is local VQ, so future reconstruction work should
+   improve local body tokenization before more root-token tuning.
