@@ -22,6 +22,8 @@ Artifacts:
   `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_scratch_full_r3_v1/checkpoints/best.pt`
 - Reproduction script:
   `scripts/train_factorized_scratch_m4human.sh`
+- FAST-like DCT root codec:
+  `src/motiongpt_m4human/factorized/root_fast_codec.py`
 
 M4Human test196:
 
@@ -192,29 +194,107 @@ discrete spline/control-point tokens
 Do not discretize the current R3 `98 x 256` latent. That would tokenize an
 already oversized representation and likely make the downstream problem harder.
 
-## Recommended Immediate Plan
+## Root-FAST Continuous DCT Codec
 
-The next concrete step should be C1, a compression sweep. The most informative
-first three runs are:
+Following the FAST-like idea, we implemented a no-training root command codec:
 
 ```text
-C1b: 4x downsample, width 32  -> 1,568 values
-C1e: 8x downsample, width 32  ->   800 values
-C1h: 16x downsample, width 16 ->   208 values
+root command u[t] = [yaw_rate, local_vx, local_vz, root_height]
+u[t] -> chunked DCT -> keep K low-frequency coefficients -> inverse DCT
+```
+
+This is intentionally evaluated before any learned quantization. The purpose is
+to answer whether root commands are compressible in a physically meaningful
+frequency-domain representation.
+
+Important detail: this eval uses GT local pose and only replaces root commands
+with DCT-reconstructed root commands. Therefore the MPJPE values below are
+root-codec error, not full local-token reconstruction error.
+
+Output paths:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_dct_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_dct_v1_val
+```
+
+### Test196 Sweep
+
+| chunk | K | values | raw/root compression | MPJPE | root-align | root xz mean | final xz | path error | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 2 | 56 | 14.00x | 18.056 mm | 9.613 mm | 17.609 mm | 11.428 mm | -0.1760 m | -18.828 mm/s |
+| 16 | 2 | 104 | 7.54x | 5.020 mm | 4.944 mm | 4.795 mm | 3.641 mm | -0.0575 m | -6.153 mm/s |
+| 32 | 4 | 112 | 7.00x | 4.164 mm | 4.308 mm | 3.961 mm | 2.943 mm | -0.0408 m | -4.366 mm/s |
+| 32 | 6 | 168 | 4.67x | 1.863 mm | 2.322 mm | 1.738 mm | 1.156 mm | -0.0260 m | -2.781 mm/s |
+| 8 | 2 | 200 | 3.92x | 1.375 mm | 2.068 mm | 1.266 mm | 0.762 mm | -0.0204 m | -2.185 mm/s |
+| 16 | 4 | 208 | 3.77x | 1.204 mm | 1.518 mm | 1.117 mm | 0.418 mm | -0.0179 m | -1.911 mm/s |
+| 32 | 8 | 224 | 3.50x | 1.113 mm | 1.127 mm | 1.041 mm | 0.295 mm | -0.0165 m | -1.765 mm/s |
+| 16 | 6 | 312 | 2.51x | 0.620 mm | 0.659 mm | 0.575 mm | 0.390 mm | -0.0094 m | -1.011 mm/s |
+| 8 | 4 | 400 | 1.96x | 0.401 mm | 0.522 mm | 0.367 mm | 0.235 mm | -0.0055 m | -0.588 mm/s |
+| 16 | 8 | 416 | 1.88x | 0.442 mm | 0.451 mm | 0.410 mm | 0.214 mm | -0.0063 m | -0.670 mm/s |
+| 8 | 6 | 600 | 1.31x | 0.308 mm | 0.294 mm | 0.291 mm | 0.281 mm | -0.0038 m | -0.406 mm/s |
+| 8 | 8 | 800 | 0.98x | ~0 mm | ~0 mm | ~0 mm | ~0 mm | ~0 m | ~0 mm/s |
+
+### Val196 Check
+
+| chunk | K | values | raw/root compression | MPJPE | root-align | root xz mean | final xz | path error | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 2 | 104 | 7.54x | 4.359 mm | 4.286 mm | 4.170 mm | 2.620 mm | -0.0599 m | -6.224 mm/s |
+| 16 | 4 | 208 | 3.77x | 0.966 mm | 1.330 mm | 0.892 mm | 0.269 mm | -0.0143 m | -1.489 mm/s |
+| 32 | 2 | 56 | 14.00x | 16.001 mm | 9.408 mm | 15.612 mm | 8.248 mm | -0.1807 m | -18.774 mm/s |
+| 32 | 4 | 112 | 7.00x | 3.522 mm | 3.397 mm | 3.368 mm | 2.248 mm | -0.0418 m | -4.345 mm/s |
+
+### Interpretation
+
+This is a very strong positive result.
+
+- Root commands are highly compressible with a simple deterministic DCT codec.
+- `chunk=16, K=4` uses only `208` continuous values for a 196-frame clip and
+  gets `1.20 mm` test MPJPE / `1.12 mm` root xz mean error.
+- `chunk=16, K=2` uses only `104` values and still keeps test MPJPE around
+  `5.02 mm`, although it has noticeable path/speed underestimation.
+- Even `chunk=32, K=4` uses only `112` values and stays around `4.16 mm` test
+  MPJPE.
+
+Compared with R3:
+
+```text
+R3 root latent:        25,088 continuous values
+Root-FAST 16x4 coeffs:    208 continuous values
+Root-FAST 16x2 coeffs:    104 continuous values
+```
+
+This means the compact root representation problem is likely much easier than
+the R3 latent suggested. R3 should remain the neural quality reference, but the
+Root-FAST DCT coefficients are a better interface for upstream prediction or
+future discretization.
+
+## Recommended Immediate Plan
+
+The original C1 learned-latent compression sweep is now lower priority because
+the no-training DCT codec is already far more compact than R3. The next concrete
+step should be DCT coefficient quantization.
+
+Recommended first quantization baselines:
+
+```text
+Q1: chunk=16, K=4, scalar quantization per coefficient dimension
+Q2: chunk=16, K=4, k-means vector quantization over flattened 16-D coeffs
+Q3: chunk=32, K=4, k-means vector quantization over flattened 16-D coeffs
 ```
 
 Interpretation:
 
-- If C1e stays near `<=60 mm` full MPJPE and `<=10 mm` gap, root compression is
-  mostly solved.
-- If only C1b works, the representation is compressible but still moderately
-  large.
-- If all compact variants fail, the next direction should be spline/control
-  points rather than making the unconstrained latent wider again.
+- If Q2 works, a 196-frame clip can be represented by about `13` root action
+  tokens.
+- If Q3 works, a 196-frame clip can be represented by about `7` root action
+  tokens.
+- If scalar quantization works, we can keep the representation continuous-ish
+  but compact and easy for regressors/projectors.
 
 ## Current Decision
 
-Use R3 as the quality reference, not as the final representation.
+Use R3 as the neural quality reference, not as the final representation.
 
-The next objective is to find the smallest root representation that keeps most
-of R3's reconstruction quality.
+The next objective is to turn Root-FAST DCT coefficients into discrete root
+action tokens.

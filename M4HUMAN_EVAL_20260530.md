@@ -844,3 +844,59 @@ root reconstruction quality alone. The detailed compression plan is stored in:
 ```text
 ROOT_LATENT_COMPRESSION.md
 ```
+
+## Root-FAST Continuous DCT Codec
+
+This pass implements a FAST-like no-training root command codec:
+
+```text
+u[t] = [yaw_rate, local_vx, local_vz, root_height]
+u[t] -> chunked DCT -> keep K low-frequency coefficients -> inverse DCT
+```
+
+The eval keeps GT local pose and only replaces root commands with
+DCT-reconstructed root commands. Therefore these numbers measure the root codec
+itself, not local VQ reconstruction.
+
+Code:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_codec.py
+```
+
+Output paths:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_dct_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_dct_v1_val
+```
+
+### Test196 Sweep
+
+| chunk | K | values | compression | MPJPE | root-align | root xz mean | final xz | path error | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 32 | 2 | 56 | 14.00x | 18.056 mm | 9.613 mm | 17.609 mm | 11.428 mm | -0.1760 m | -18.828 mm/s |
+| 16 | 2 | 104 | 7.54x | 5.020 mm | 4.944 mm | 4.795 mm | 3.641 mm | -0.0575 m | -6.153 mm/s |
+| 32 | 4 | 112 | 7.00x | 4.164 mm | 4.308 mm | 3.961 mm | 2.943 mm | -0.0408 m | -4.366 mm/s |
+| 16 | 4 | 208 | 3.77x | 1.204 mm | 1.518 mm | 1.117 mm | 0.418 mm | -0.0179 m | -1.911 mm/s |
+| 16 | 6 | 312 | 2.51x | 0.620 mm | 0.659 mm | 0.575 mm | 0.390 mm | -0.0094 m | -1.011 mm/s |
+
+### Val196 Check
+
+| chunk | K | values | compression | MPJPE | root-align | root xz mean | final xz | path error | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 2 | 104 | 7.54x | 4.359 mm | 4.286 mm | 4.170 mm | 2.620 mm | -0.0599 m | -6.224 mm/s |
+| 16 | 4 | 208 | 3.77x | 0.966 mm | 1.330 mm | 0.892 mm | 0.269 mm | -0.0143 m | -1.489 mm/s |
+| 32 | 2 | 56 | 14.00x | 16.001 mm | 9.408 mm | 15.612 mm | 8.248 mm | -0.1807 m | -18.774 mm/s |
+| 32 | 4 | 112 | 7.00x | 3.522 mm | 3.397 mm | 3.368 mm | 2.248 mm | -0.0418 m | -4.345 mm/s |
+
+### Interpretation
+
+- This is a strong positive result for a FAST-like root trajectory branch.
+- `chunk=16, K=4` uses only `208` continuous values for a 196-frame clip and
+  gets `1.204 mm` test MPJPE / `1.117 mm` root xz mean error.
+- `chunk=16, K=2` uses only `104` values and still stays near `5 mm` test
+  MPJPE, though speed/path underestimation is visible.
+- The next step should be DCT coefficient quantization, especially k-means
+  vector quantization over each chunk's flattened `K x 4` coefficients. With
+  `chunk=16`, this would make a 196-frame clip about `13` root action tokens.

@@ -35,6 +35,7 @@ Code:
 
 - `src/motiongpt_m4human/factorized/local_vq.py`
 - `src/motiongpt_m4human/factorized/root_branch.py`
+- `src/motiongpt_m4human/factorized/root_fast_codec.py`
 - `src/motiongpt_m4human/factorized/cache.py`
 - `src/motiongpt_m4human/factorized/representation.py`
 - `scripts/train_factorized_scratch_m4human.sh`
@@ -354,10 +355,9 @@ Known limitations:
 ## Recommended Next Steps
 
 1. Treat R3 as the quality reference, not the final compact representation.
-2. Run the root latent compression sweep described in
-   `ROOT_LATENT_COMPRESSION.md`.
-3. Find the smallest continuous root representation that keeps most of R3's
-   reconstruction quality.
-4. Only after compact continuous root works, consider root discretization.
-5. Defer HumanML3D mixed-domain training until the M4Human root representation
-   interface is no longer overcomplete.
+2. Use the Root-FAST DCT codec as the next compact root interface. The
+   no-training `chunk=16, K=4` setting uses only `208` continuous values for a
+   196-frame clip and gives about `1.20 mm` root-codec MPJPE on M4Human test.
+3. Quantize Root-FAST DCT coefficients into root action tokens.
+4. Only after compact root coefficients/tokens work, revisit HumanML3D
+   mixed-domain training and downstream projector design.
