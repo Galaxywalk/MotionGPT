@@ -10,6 +10,8 @@ This is the cold-start TODO for the next compute window. Current state:
   one-token-per-chunk vector VQ is too lossy.
 - Product VQ is better than vector VQ, but still not good enough to be the
   final root tokenizer.
+- Root-FAST RVQ has now been implemented and evaluated. It is the strongest
+  token-like root representation so far.
 
 ## Current Artifacts
 
@@ -25,8 +27,10 @@ Experiment outputs:
 ```text
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_dct_v1
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_quantized_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_vector_fixed_v2
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_scalar_v1
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_product_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1
 ```
 
 Main docs:
@@ -56,6 +60,17 @@ Product VQ, test196:
 | 28 | 32 | 2 | 256 | 224 | 53.67 mm | 51.57 mm | 80.14 mm |
 | 52 | 16 | 2 | 256 | 416 | 41.20 mm | 39.68 mm | 63.61 mm |
 
+Root-FAST RVQ, best test196 by token budget:
+
+| root tokens | chunk | K | vocab | depth | bits/window | MPJPE | root xz mean | final xz |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 98 | 4 | 1024 | 4 | 80 | 89.97 mm | 87.11 mm | 128.46 mm |
+| 16 | 98 | 4 | 512 | 8 | 144 | 54.57 mm | 53.09 mm | 67.76 mm |
+| 28 | 32 | 2 | 1024 | 4 | 280 | 35.12 mm | 34.11 mm | 45.47 mm |
+| 52 | 16 | 2 | 1024 | 4 | 520 | 23.23 mm | 22.52 mm | 34.07 mm |
+| 56 | 32 | 2 | 512 | 8 | 504 | 20.15 mm | 19.64 mm | 16.55 mm |
+| 104 | 16 | 2 | 1024 | 8 | 1040 | 7.03 mm | 6.76 mm | 7.47 mm |
+
 Scalar quantization, test196:
 
 | config | scalar codes | bits/window | MPJPE | root xz mean | final xz |
@@ -80,78 +95,60 @@ and smaller per-token targets, so it improves substantially. Scalar quantization
 shows that the coefficients themselves are easy to discretize if enough scalar
 codes are allowed.
 
-The next target should be a middle ground:
+The updated target is a middle ground:
 
 ```text
-few root tokens, but more than plain vector VQ
+28-56 root tokens for balanced compression
+104 root tokens for high-quality reconstruction
 shared vocab size around 256-1024
-root-only MPJPE closer to scalar 8-bit than product VQ
 ```
 
-## Next Compute TODO
+## Completed Compute Items
 
-1. Rerun the fixed full vector VQ sweep.
+1. Fixed full vector VQ sweep.
 
-   The first full vector sweep had an early-stop bug in k-means. The code is now
-   fixed. A small post-fix check still looked weak, but the complete fixed sweep
-   should be rerun before closing this branch.
+   The fixed sweep confirms the earlier conclusion: full-chunk vector VQ is too
+   lossy. Best test196 results are:
 
-   ```bash
-   conda run -p /cpfs01/liangbo/data/conda_envs/mgpt \
-     python -m src.motiongpt_m4human.factorized.root_fast_quantize \
-     --out-dir /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_vector_fixed_v2 \
-     --mode vector \
-     --eval-splits val test \
-     --chunk-sizes 16 32 64 98 196 \
-     --coeff-counts 2 4 \
-     --codebook-sizes 64 128 256 512 1024 \
-     --kmeans-iters 50 \
-     --batch-size 512
+   ```text
+   13 tokens, vocab 1024: 128.28 mm
+    7 tokens, vocab 1024: 139.29 mm
+    4 tokens, vocab 1024: 164.43 mm
    ```
 
-2. Implement Root-FAST RVQ.
+2. Root-FAST RVQ implementation and sweep.
 
-   This is the highest-priority next implementation. Fit residual codebooks over
-   flattened DCT chunks:
+   RVQ is implemented as:
 
    ```text
    coeff vector -> code_1 + residual -> code_2 + ... -> code_R
    ```
 
-   Suggested first sweep:
+   Completed sweep:
 
    ```text
-   chunk sizes: 16, 32
+   chunk sizes: 16, 32, 64, 98, 196
    K:           2, 4
    vocab:       256, 512, 1024
    RVQ depth:   2, 4, 8
    ```
 
-   Expected token counts:
+## Next Compute TODO
 
-   ```text
-   chunk=16, R=4 -> 13 * 4 = 52 root tokens
-   chunk=32, R=4 ->  7 * 4 = 28 root tokens
-   chunk=16, R=8 -> 13 * 8 = 104 root tokens
-   ```
-
-3. Implement Product-RVQ if plain RVQ is not enough.
-
-   Product VQ already showed a useful direction. Product-RVQ can be applied per
-   root command dimension:
-
-   ```text
-   per-dim DCT coeffs -> residual code_1 ... code_R
-   ```
-
-   This will use more tokens, but may approach scalar quantization quality with
-   a token-like representation.
-
-4. Combine Root-FAST root reconstruction with local VQ.
+1. Full tokenizer evaluation with local VQ + Root-FAST RVQ.
 
    Current Root-FAST numbers use GT local pose and measure root codec error.
    The next full tokenizer evaluation should replace local pose with the trained
-   local VQ decoder and root with the Root-FAST reconstruction.
+   local VQ decoder and root with the selected Root-FAST RVQ reconstruction.
+
+   Evaluate these root operating points first:
+
+   ```text
+   aggressive:       chunk=32, K=2, vocab=1024, depth=4  -> 28 root tokens
+   balanced:         chunk=16, K=2, vocab=1024, depth=4  -> 52 root tokens
+   balanced/high-q:  chunk=32, K=2, vocab=512,  depth=8  -> 56 root tokens
+   high-quality:     chunk=16, K=2, vocab=512,  depth=8  -> 104 root tokens
+   ```
 
    Key metrics:
 
@@ -165,20 +162,18 @@ root-only MPJPE closer to scalar 8-bit than product VQ
    speed bias
    ```
 
-5. Decide the root-token operating point.
+2. Decide the root-token operating point after full local+root eval.
 
-   Candidate targets:
+   Current root-only interpretation:
 
    ```text
-   aggressive:  28 root tokens, vocab 512/1024, root-only MPJPE <= 25 mm
-   balanced:    52 root tokens, vocab 512/1024, root-only MPJPE <= 15 mm
-   high-quality:104 root tokens, vocab 256/512, root-only MPJPE <= 10 mm
+   <= 16 tokens: too lossy for faithful root trajectory
+   28 tokens:    plausible aggressive setting
+   52-56 tokens: likely balanced setting
+   104 tokens:   near-scalar quality, longer sequence
    ```
 
-   A good practical target is likely the balanced setting. It is much smaller
-   than R3 and not too long for upstream sequence models.
-
-6. Only after root tokens are stable, train predictors.
+3. Only after root tokens are stable, train predictors.
 
    Do not start from mmWave yet. First verify proxy tasks:
 
@@ -196,8 +191,6 @@ root-only MPJPE closer to scalar 8-bit than product VQ
 ## Do Not Prioritize
 
 - More R3 training. R3 is already a quality reference, not a compact tokenizer.
-- Plain one-token-per-chunk vector VQ unless the fixed sweep contradicts the
-  current smoke check.
-- Larger product VQ vocab without first trying RVQ. Product vocab 256 is still
-  improving, but raising vocab alone will make the downstream classifier harder.
+- Plain one-token-per-chunk vector VQ. The fixed sweep confirms it is too lossy.
+- Larger product VQ vocab. RVQ is now a better token-like path.
 - New root trajectory neural losses before the token representation is settled.

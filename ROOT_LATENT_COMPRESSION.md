@@ -307,11 +307,12 @@ We added a Root-FAST coefficient quantization evaluator:
 src/motiongpt_m4human/factorized/root_fast_quantize.py
 ```
 
-It supports three quantization modes:
+It supports four quantization modes:
 
 ```text
 vector:  one k-means token for the full flattened DCT chunk
 product: one k-means token per root-command dimension per chunk
+rvq:     residual vector quantization over flattened DCT chunks
 scalar:  uniform scalar quantization per DCT coefficient
 ```
 
@@ -319,8 +320,10 @@ Artifacts:
 
 ```text
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_quantized_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_vector_fixed_v2
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_scalar_v1
 /cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_product_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1
 ```
 
 Important caveat: the first full vector sweep in `root_fast_quantized_v1` used
@@ -396,3 +399,89 @@ For `chunk=16`, this would use:
 
 For example, `R=4` gives `52` root tokens, matching the product-VQ token count
 but preserving cross-dimension structure better.
+
+## Root-FAST RVQ Results
+
+We implemented and ran Root-FAST residual vector quantization:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_quantize.py --mode rvq
+```
+
+Output:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1/combined_summary.json
+```
+
+The sweep covers:
+
+```text
+chunk sizes: 16, 32, 64, 98, 196
+K:           2, 4
+vocab:       256, 512, 1024
+RVQ depth:   2, 4, 8
+```
+
+Best test196 result at each token budget:
+
+| root tokens | chunk | K | vocab | depth | bits/window | MPJPE | root-align | root xz mean | final xz | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 196 | 4 | 1024 | 2 | 20 | 159.96 mm | 44.09 mm | 154.56 mm | 216.14 mm | -82.81 mm/s |
+| 4 | 196 | 4 | 1024 | 4 | 40 | 129.63 mm | 36.09 mm | 125.82 mm | 165.32 mm | -80.74 mm/s |
+| 8 | 98 | 4 | 1024 | 4 | 80 | 89.97 mm | 26.00 mm | 87.11 mm | 128.46 mm | -35.37 mm/s |
+| 16 | 98 | 4 | 512 | 8 | 144 | 54.57 mm | 17.74 mm | 53.09 mm | 67.76 mm | -33.36 mm/s |
+| 28 | 32 | 2 | 1024 | 4 | 280 | 35.12 mm | 13.18 mm | 34.11 mm | 45.47 mm | -19.12 mm/s |
+| 52 | 16 | 2 | 1024 | 4 | 520 | 23.23 mm | 8.82 mm | 22.52 mm | 34.07 mm | -6.49 mm/s |
+| 56 | 32 | 2 | 512 | 8 | 504 | 20.15 mm | 9.99 mm | 19.64 mm | 16.55 mm | -18.98 mm/s |
+| 104 | 16 | 2 | 1024 | 8 | 1040 | 7.03 mm | 5.24 mm | 6.76 mm | 7.47 mm | -6.32 mm/s |
+
+### RVQ Interpretation
+
+RVQ is a clear improvement over product VQ and full-chunk vector VQ.
+
+At comparable token counts:
+
+```text
+Product VQ 52 tokens, vocab 256: 41.20 mm
+RVQ     52 tokens, vocab 256: 40.92 mm
+RVQ     52 tokens, vocab 512: 30.40 mm
+RVQ     52 tokens, vocab 1024: 23.23 mm
+```
+
+At higher token count:
+
+```text
+RVQ 104 tokens, vocab 256:  9.33 mm
+RVQ 104 tokens, vocab 512:  7.66 mm
+RVQ 104 tokens, vocab 1024: 7.03 mm
+Scalar 104 codes, 8-bit:    9.94 mm
+```
+
+The most important negative result is that very small token counts remain
+insufficient:
+
+```text
+<= 8 tokens:  89.97 mm best root-only MPJPE
+<= 16 tokens: 54.57 mm best root-only MPJPE
+```
+
+So the practical Root-FAST range is not 2-16 root tokens per 196-frame clip.
+The useful region starts around 28-56 tokens, with 104 tokens giving near-scalar
+quality.
+
+Another consistent finding is that `K=2` often beats `K=4` after tokenization,
+even though continuous DCT with `K=4` is better. `K=4` doubles the coefficient
+dimension per chunk, making each residual code harder to fit. With the current
+RVQ setup, lower coefficient dimension plus more residual stages is a better
+tokenization tradeoff.
+
+Current recommended operating points:
+
+| setting | token count | use case |
+| --- | ---: | --- |
+| `chunk=32,K=2,vocab=1024,depth=4` | 28 | aggressive, root-only MPJPE 35.12 mm |
+| `chunk=16,K=2,vocab=1024,depth=4` | 52 | balanced, root-only MPJPE 23.23 mm |
+| `chunk=32,K=2,vocab=512,depth=8` | 56 | balanced/high-quality, root-only MPJPE 20.15 mm |
+| `chunk=16,K=2,vocab=512,depth=8` | 104 | high-quality, root-only MPJPE 7.66 mm |

@@ -981,3 +981,73 @@ Detailed next-step TODO:
 ```text
 ROOT_FAST_TOKENIZER_TODO.md
 ```
+
+## Root-FAST RVQ Sweep
+
+We implemented residual vector quantization over flattened DCT coefficient
+chunks:
+
+```text
+coeff vector -> code_1 + residual -> code_2 + ... -> code_R
+```
+
+Code:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_quantize.py --mode rvq
+```
+
+Outputs:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1/combined_summary.json
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_vector_fixed_v2
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_vector_fixed_v2/combined_summary.json
+```
+
+Sweep:
+
+```text
+chunk sizes: 16, 32, 64, 98, 196
+K:           2, 4
+vocab:       256, 512, 1024
+RVQ depth:   2, 4, 8
+```
+
+### RVQ Test196 Frontier
+
+| root tokens | chunk | K | vocab | depth | bits/window | MPJPE | root-align | root xz mean | final xz | speed bias |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 196 | 4 | 1024 | 2 | 20 | 159.96 mm | 44.09 mm | 154.56 mm | 216.14 mm | -82.81 mm/s |
+| 4 | 196 | 4 | 1024 | 4 | 40 | 129.63 mm | 36.09 mm | 125.82 mm | 165.32 mm | -80.74 mm/s |
+| 8 | 98 | 4 | 1024 | 4 | 80 | 89.97 mm | 26.00 mm | 87.11 mm | 128.46 mm | -35.37 mm/s |
+| 16 | 98 | 4 | 512 | 8 | 144 | 54.57 mm | 17.74 mm | 53.09 mm | 67.76 mm | -33.36 mm/s |
+| 28 | 32 | 2 | 1024 | 4 | 280 | 35.12 mm | 13.18 mm | 34.11 mm | 45.47 mm | -19.12 mm/s |
+| 52 | 16 | 2 | 1024 | 4 | 520 | 23.23 mm | 8.82 mm | 22.52 mm | 34.07 mm | -6.49 mm/s |
+| 56 | 32 | 2 | 512 | 8 | 504 | 20.15 mm | 9.99 mm | 19.64 mm | 16.55 mm | -18.98 mm/s |
+| 104 | 16 | 2 | 1024 | 8 | 1040 | 7.03 mm | 5.24 mm | 6.76 mm | 7.47 mm | -6.32 mm/s |
+
+### Interpretation
+
+- RVQ is the best token-like root codec so far.
+- The fixed vector VQ rerun confirms one-token-per-DCT-chunk is too lossy:
+  best 13-token vector VQ is still `128.28 mm`.
+- Very small root token budgets are not enough. `<=16` tokens still leaves
+  `54.57 mm` root-only MPJPE at best.
+- The practical region starts around `28` root tokens. The balanced region is
+  probably `52-56` tokens.
+- `104` tokens reaches near scalar-quantization quality: `7.03 mm` vs scalar
+  `9.94 mm` for `chunk=16,K=2,8-bit`.
+- After quantization, `K=2` often beats `K=4`. `K=4` improves continuous DCT
+  reconstruction, but it doubles the coefficient dimension per chunk and is
+  harder for RVQ to discretize.
+
+Recommended next full-tokenizer eval configs:
+
+| setting | root config | root tokens |
+| --- | --- | ---: |
+| aggressive | `chunk=32,K=2,vocab=1024,depth=4` | 28 |
+| balanced | `chunk=16,K=2,vocab=1024,depth=4` | 52 |
+| balanced/high-quality | `chunk=32,K=2,vocab=512,depth=8` | 56 |
+| high-quality | `chunk=16,K=2,vocab=512,depth=8` | 104 |

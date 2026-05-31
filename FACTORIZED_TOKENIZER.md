@@ -362,8 +362,9 @@ Known limitations:
    196-frame clip and gives about `1.20 mm` root-codec MPJPE on M4Human test.
 3. Quantize Root-FAST DCT coefficients into root action tokens. Current
    evidence says plain one-token-per-chunk VQ is too lossy, scalar quantization
-   preserves quality but uses many scalar codes, and product VQ is a useful but
-   still imperfect middle point. The next priority is Root-FAST RVQ over DCT
-   chunks.
-4. Only after compact root coefficients/tokens work, revisit HumanML3D
+   preserves quality but uses many scalar codes, and RVQ is the best token-like
+   route so far. Good root-only operating points are `28`, `52-56`, and `104`
+   root tokens per 196-frame clip.
+4. Next, evaluate full local-VQ + Root-FAST-RVQ reconstruction. Only after
+   compact root coefficients/tokens work, revisit HumanML3D
    mixed-domain training and downstream projector design.

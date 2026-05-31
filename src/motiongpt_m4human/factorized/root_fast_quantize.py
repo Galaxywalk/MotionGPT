@@ -134,6 +134,43 @@ class ProductKMeansQuantizer:
 
 
 @dataclass
+class ResidualVectorKMeansQuantizer:
+    quantizers: list[VectorKMeansQuantizer]
+
+    @property
+    def depth(self) -> int:
+        return len(self.quantizers)
+
+    @property
+    def codebook_size(self) -> int:
+        return int(self.quantizers[0].codebook_size)
+
+    def quantize(self, vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        residual = vectors.astype(np.float32, copy=True)
+        quantized = np.zeros_like(residual)
+        codes = np.empty((vectors.shape[0], self.depth), dtype=np.int64)
+        for idx, quantizer in enumerate(self.quantizers):
+            q_step, code_step = quantizer.quantize(residual)
+            quantized += q_step
+            residual -= q_step
+            codes[:, idx] = code_step
+        return quantized.astype(np.float32, copy=False), codes
+
+    def save(self, path: Path, metadata: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        arrays: dict[str, Any] = {
+            "depth": np.asarray(self.depth, dtype=np.int64),
+            "metadata": np.asarray(json.dumps(metadata, sort_keys=True)),
+        }
+        for idx, quantizer in enumerate(self.quantizers):
+            arrays[f"centroids_norm_{idx}"] = quantizer.centroids_norm.astype(np.float32, copy=False)
+            arrays[f"mean_{idx}"] = quantizer.mean.astype(np.float32, copy=False)
+            arrays[f"std_{idx}"] = quantizer.std.astype(np.float32, copy=False)
+            arrays[f"normalize_{idx}"] = np.asarray(quantizer.normalize, dtype=np.bool_)
+        np.savez_compressed(path, **arrays)
+
+
+@dataclass
 class ScalarUniformQuantizer:
     lo: np.ndarray
     hi: np.ndarray
@@ -274,6 +311,69 @@ def _fit_product_kmeans(
     return product, stats
 
 
+def _fit_rvq(
+    vectors: np.ndarray,
+    codebook_size: int,
+    depth: int,
+    normalize: bool,
+    max_iters: int,
+    seed: int,
+) -> tuple[ResidualVectorKMeansQuantizer, dict[str, Any]]:
+    if vectors.ndim != 2:
+        raise ValueError(f"Expected [N,D] vectors, got {vectors.shape}")
+    if depth <= 0:
+        raise ValueError("depth must be positive")
+
+    residual = vectors.astype(np.float32, copy=True)
+    reconstruction = np.zeros_like(residual)
+    quantizers: list[VectorKMeansQuantizer] = []
+    stage_stats: list[dict[str, Any]] = []
+    for stage in range(depth):
+        quantizer, stats = _fit_vector_kmeans(
+            residual,
+            codebook_size=codebook_size,
+            normalize=normalize,
+            max_iters=max_iters,
+            seed=seed + stage * 10007,
+        )
+        q_step, codes = quantizer.quantize(residual)
+        reconstruction += q_step
+        residual = vectors - reconstruction
+        hist = np.bincount(codes, minlength=quantizer.codebook_size).astype(np.float64)
+        probs = hist / max(hist.sum(), 1.0)
+        entropy = float(-(probs[probs > 0] * np.log(probs[probs > 0])).sum())
+        stats = {
+            **stats,
+            "stage": int(stage),
+            "residual_coeff_mse_after_stage": float(np.mean(np.square(residual))),
+            "residual_coeff_l1_after_stage": float(np.mean(np.abs(residual))),
+            "stage_unique_codes": int(np.count_nonzero(hist)),
+            "stage_effective_vocab": float(math.exp(entropy)),
+        }
+        quantizers.append(quantizer)
+        stage_stats.append(stats)
+
+    rvq = ResidualVectorKMeansQuantizer(quantizers=quantizers)
+    quantized, train_codes = rvq.quantize(vectors)
+    stats = {
+        "train_vector_count": int(vectors.shape[0]),
+        "requested_codebook_size": int(codebook_size),
+        "codebook_size": int(rvq.codebook_size),
+        "rvq_depth": int(rvq.depth),
+        "normalize": bool(normalize),
+        "train_coeff_mse": float(np.mean(np.square(quantized - vectors))),
+        "train_coeff_l1": float(np.mean(np.abs(quantized - vectors))),
+        "train_unique_codes_per_stage": [
+            int(len(np.unique(train_codes[:, stage]))) for stage in range(train_codes.shape[1])
+        ],
+        "train_effective_vocab_per_stage": [
+            float(stage["stage_effective_vocab"]) for stage in stage_stats
+        ],
+        "stage_stats": stage_stats,
+    }
+    return rvq, stats
+
+
 def _fit_scalar_uniform(
     vectors: np.ndarray,
     bits: int,
@@ -389,7 +489,7 @@ def _empty_sums() -> dict[str, float]:
 
 def _flush_eval(
     batch: list[dict[str, Any]],
-    quantizer: VectorKMeansQuantizer | ProductKMeansQuantizer | ScalarUniformQuantizer,
+    quantizer: VectorKMeansQuantizer | ProductKMeansQuantizer | ResidualVectorKMeansQuantizer | ScalarUniformQuantizer,
     quantizer_mode: str,
     chunk_size: int,
     coeff_count: int,
@@ -454,7 +554,7 @@ def _flush_eval(
     sums["frame_count"] += int(features_np.shape[0] * features_np.shape[1])
     if quantizer_mode == "vector" and code_hist is not None:
         np.add.at(code_hist, codes, 1)
-    elif quantizer_mode == "product" and code_hist is not None:
+    elif quantizer_mode in ("product", "rvq") and code_hist is not None:
         for group in range(codes.shape[1]):
             np.add.at(code_hist[group], codes[:, group], 1)
 
@@ -462,7 +562,7 @@ def _flush_eval(
 def evaluate_quantizer(
     args: argparse.Namespace,
     split: str,
-    quantizer: VectorKMeansQuantizer | ProductKMeansQuantizer | ScalarUniformQuantizer,
+    quantizer: VectorKMeansQuantizer | ProductKMeansQuantizer | ResidualVectorKMeansQuantizer | ScalarUniformQuantizer,
     quantizer_mode: str,
     train_stats: dict[str, Any],
     fit_stats: dict[str, Any],
@@ -482,6 +582,8 @@ def evaluate_quantizer(
         if quantizer_mode == "vector" and isinstance(quantizer, VectorKMeansQuantizer)
         else np.zeros((quantizer.groups, quantizer.codebook_size), dtype=np.int64)
         if quantizer_mode == "product" and isinstance(quantizer, ProductKMeansQuantizer)
+        else np.zeros((quantizer.depth, quantizer.codebook_size), dtype=np.int64)
+        if quantizer_mode == "rvq" and isinstance(quantizer, ResidualVectorKMeansQuantizer)
         else None
     )
     pending: dict[int, list[dict[str, Any]]] = {}
@@ -545,6 +647,10 @@ def evaluate_quantizer(
             if quantizer_mode == "vector"
             else chunks_per_window * ROOT_CONTROL_DIM
             if quantizer_mode == "product" and chunks_per_window is not None
+            else chunks_per_window * quantizer.depth
+            if quantizer_mode == "rvq"
+            and isinstance(quantizer, ResidualVectorKMeansQuantizer)
+            and chunks_per_window is not None
             else None
         ),
         "scalar_codes_per_window": coeff_values if quantizer_mode == "scalar" else None,
@@ -633,6 +739,31 @@ def evaluate_quantizer(
             ),
             **product_stats,
         })
+    elif quantizer_mode == "rvq" and isinstance(quantizer, ResidualVectorKMeansQuantizer):
+        rvq_stats: dict[str, Any] = {}
+        if code_hist is not None:
+            unique = []
+            effective = []
+            for stage in range(code_hist.shape[0]):
+                stage_hist = code_hist[stage]
+                probs = stage_hist.astype(np.float64) / max(float(stage_hist.sum()), 1.0)
+                entropy = float(-(probs[probs > 0] * np.log(probs[probs > 0])).sum())
+                unique.append(int(np.count_nonzero(stage_hist)))
+                effective.append(float(math.exp(entropy)))
+            rvq_stats = {
+                "unique_codes_per_stage": unique,
+                "effective_vocab_per_stage": effective,
+            }
+        result.update({
+            "codebook_size": int(quantizer.codebook_size),
+            "rvq_depth": int(quantizer.depth),
+            "bits_per_window": (
+                float(chunks_per_window) * float(quantizer.depth) * math.log2(max(quantizer.codebook_size, 2))
+                if chunks_per_window is not None
+                else None
+            ),
+            **rvq_stats,
+        })
     return result
 
 
@@ -647,7 +778,7 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
     quantizer_dir = out_dir / "quantizers"
     results: list[dict[str, Any]] = []
     modes = (
-        ["vector", "product", "scalar"]
+        ["vector", "product", "rvq", "scalar"]
         if args.mode == "all"
         else ["vector", "scalar"]
         if args.mode == "both"
@@ -766,6 +897,45 @@ def run_sweep(args: argparse.Namespace) -> dict[str, Any]:
                         _write_result(out_dir, name, result)
                         results.append(result)
                         print(json.dumps(result, indent=2, sort_keys=True))
+            if "rvq" in modes:
+                for codebook_size in args.codebook_sizes:
+                    for depth in args.rvq_depths:
+                        quantizer, fit_stats = _fit_rvq(
+                            train_vectors,
+                            codebook_size=codebook_size,
+                            depth=depth,
+                            normalize=args.normalize,
+                            max_iters=args.kmeans_iters,
+                            seed=args.seed + chunk_size * 1000 + coeff_count * 100 + codebook_size + depth * 17 + 777777,
+                        )
+                        quantizer_name = f"rvq_chunk{chunk_size}_k{coeff_count}_vocab{quantizer.codebook_size}_d{depth}"
+                        quantizer.save(
+                            quantizer_dir / f"{quantizer_name}.npz",
+                            {
+                                "mode": "rvq",
+                                "chunk_size": chunk_size,
+                                "coeff_count": coeff_count,
+                                "codebook_size": quantizer.codebook_size,
+                                "rvq_depth": quantizer.depth,
+                                "train_stats": train_stats,
+                                "fit_stats": fit_stats,
+                            },
+                        )
+                        for split in args.eval_splits:
+                            result = evaluate_quantizer(
+                                args,
+                                split=split,
+                                quantizer=quantizer,
+                                quantizer_mode="rvq",
+                                train_stats=train_stats,
+                                fit_stats=fit_stats,
+                                chunk_size=chunk_size,
+                                coeff_count=coeff_count,
+                            )
+                            name = f"rvq_{split}_w{args.window_frames}_chunk{chunk_size}_k{coeff_count}_vocab{quantizer.codebook_size}_d{depth}"
+                            _write_result(out_dir, name, result)
+                            results.append(result)
+                            print(json.dumps(result, indent=2, sort_keys=True))
 
     results = sorted(
         results,
@@ -810,10 +980,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--fps", type=float, default=20.0)
-    parser.add_argument("--mode", default="vector", choices=("vector", "product", "scalar", "both", "all"))
+    parser.add_argument("--mode", default="vector", choices=("vector", "product", "rvq", "scalar", "both", "all"))
     parser.add_argument("--chunk-sizes", nargs="+", type=int, default=[16, 32, 64, 98, 196])
     parser.add_argument("--coeff-counts", nargs="+", type=int, default=[2, 4])
     parser.add_argument("--codebook-sizes", nargs="+", type=int, default=[64, 128, 256, 512])
+    parser.add_argument("--rvq-depths", nargs="+", type=int, default=[2, 4, 8])
     parser.add_argument("--scalar-bits", nargs="+", type=int, default=[4, 6, 8])
     parser.add_argument("--range-quantile", type=float, default=0.999)
     parser.add_argument("--kmeans-iters", type=int, default=50)
