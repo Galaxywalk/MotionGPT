@@ -821,3 +821,26 @@ or test-heldout local MPJPE for checkpoint selection, not only training loss.
   recipe, not root trajectory modeling. A practical next step is to add
   validation-eval checkpointing to `local_vq.py` and select by test/val-style
   root-aligned MPJPE rather than train loss.
+
+## Root Latent Size Concern
+
+The full-scratch R3 root result is strong, but the representation is not yet
+practical for upstream or downstream models.
+
+For a 196-frame clip:
+
+```text
+R3 root latent:     98 x 256 = 25,088 continuous values
+raw root controls: 196 x 4   =    784 continuous values
+```
+
+So the current root latent is about `32x` larger than the raw root-control
+signal. It is a high-quality continuous autoencoder reference, not a compact
+tokenizer.
+
+The next stage should therefore optimize root latent compression rather than
+root reconstruction quality alone. The detailed compression plan is stored in:
+
+```text
+ROOT_LATENT_COMPRESSION.md
+```

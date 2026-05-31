@@ -38,6 +38,7 @@ Code:
 - `src/motiongpt_m4human/factorized/cache.py`
 - `src/motiongpt_m4human/factorized/representation.py`
 - `scripts/train_factorized_scratch_m4human.sh`
+- `ROOT_LATENT_COMPRESSION.md`
 
 ## Representation
 
@@ -341,9 +342,10 @@ Known limitations:
 
 - The factorized experiments are currently M4Human-focused.
 - HumanML3D still needs a matching factorized cache and mixed-domain eval.
-- The root branch is continuous, not discrete. This is intentional for quality,
-  but downstream language modeling needs a clear interface for continuous root
-  controls.
+- The root branch is continuous and currently overcomplete. For a 196-frame
+  clip, R3 uses a `98 x 256` continuous root latent, which is 32x larger than
+  the original `196 x 4` root-control signal. This is useful as a quality
+  reference, but not practical as the final upstream/downstream representation.
 - The current root branch reconstructs root controls from root controls plus
   local condition. For generation, we still need to decide whether root controls
   are predicted from text/sensor features, supplied as conditioning, or later
@@ -351,10 +353,11 @@ Known limitations:
 
 ## Recommended Next Steps
 
-1. Build a HumanML3D factorized cache with the same representation.
-2. Evaluate R3-style factorized reconstruction on HumanML3D.
-3. Train a mixed M4Human/HumanML3D factorized tokenizer.
-4. Keep R3 continuous root branch as the quality reference before attempting
-   root discretization.
-5. Only consider root discrete tokens after the continuous root branch is stable
-   across both domains.
+1. Treat R3 as the quality reference, not the final compact representation.
+2. Run the root latent compression sweep described in
+   `ROOT_LATENT_COMPRESSION.md`.
+3. Find the smallest continuous root representation that keeps most of R3's
+   reconstruction quality.
+4. Only after compact continuous root works, consider root discretization.
+5. Defer HumanML3D mixed-domain training until the M4Human root representation
+   interface is no longer overcomplete.
