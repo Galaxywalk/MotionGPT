@@ -1,11 +1,11 @@
 # Factorized Motion Tokenizer
 
-This document summarizes the current best M4Human motion tokenizer in this
+This document summarizes the M4Human factorized motion tokenizer family in this
 repository. It is not the original single-stream MotionGPT 263-D VQ-VAE. The
-current best system factorizes motion into:
+current recommended token-like system factorizes motion into:
 
 ```text
-motion = local discrete tokens + continuous root latent
+motion = local body VQ tokens + Root-FAST RVQ root tokens
 ```
 
 The main motivation is that local body pose and global root trajectory have
@@ -13,20 +13,27 @@ different error behavior. Local pose reconstruction error usually stays local,
 while root velocity and yaw errors integrate over time and become 196-frame
 drift.
 
-## Current Best Checkpoint
+The R3 continuous root branch remains the quality reference, but Root-FAST RVQ
+is the current practical token interface.
 
-The current best factorized setup is the full from-scratch R3 recipe:
+## Current Recommended Tokenizer
+
+The current best compact token-like setup is:
 
 ```text
-local branch: frozen local-only VQ
-root branch:  R3 no-skip bottleneck TCN, 2x root latent rate, multiscale loss
+local branch: local-only VQ
+root branch:  Root-FAST DCT + RVQ
 ```
 
 Artifacts:
 
-- Local VQ:
-  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_scratch_full_v1/checkpoints/best.pt`
-- Best root branch R3:
+- Local VQ used by the best full Root-FAST eval:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/local_vq_m4human_v1/checkpoints/best.pt`
+- High-quality Root-FAST RVQ:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1/chunk16_k2/quantizers/rvq_chunk16_k2_vocab1024_d8.npz`
+- Compact balanced Root-FAST RVQ:
+  `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_rvq_v1/chunk32_k2/quantizers/rvq_chunk32_k2_vocab512_d8.npz`
+- R3 continuous root branch quality reference:
   `/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_branch_m4human_scratch_full_r3_v1/checkpoints/best.pt`
 - Factorized cache:
   `/cpfs01/liangbo/data/MotionGPT/factorized_cache/v1_m4human_xz-y_20hz`
@@ -150,7 +157,9 @@ U-Net skip variant, which should be treated as an optimistic upper bound.
 
 ## Training Process
 
-Training is staged.
+Training and evaluation are staged. R3 is trained as a quality reference. The
+Root-FAST branch is a codec/quantizer path: DCT compression and RVQ quantization
+are fitted and evaluated after the factorized cache exists.
 
 ### Stage 1: Build Factorized Cache
 
@@ -280,10 +289,9 @@ tokens per 196-frame clip:  46.99
 contact F1:                 0.994
 ```
 
-The earlier shorter local VQ run reached a better local-only test196 MPJPE
-(`51.168 mm`). The full scratch recipe is still the current best end-to-end
-factorized reconstruction because its root branch is trained longer and reduces
-global trajectory error more strongly.
+The earlier shorter local VQ run reached the better local-only test196 MPJPE
+(`51.168 mm`) and is the preferred local checkpoint for the full Root-FAST
+tokenizer eval.
 
 ### Root Branch
 
@@ -326,17 +334,17 @@ local articulated pose.
 The factorized tokenizer works because:
 
 ```text
-local body motion -> discrete VQ tokens
-global root motion -> continuous root latent
+local body motion -> local VQ tokens
+global root motion -> separate root representation
 ```
 
-The local tokens capture body pose well. The continuous root branch prevents
-small root velocity/yaw errors from accumulating into large 196-frame drift.
+The local tokens capture body pose well. The separate root branch prevents small
+root velocity/yaw errors from accumulating into large 196-frame drift.
 
-The full from-scratch R3 is currently the best M4Human reconstruction path in
-this repo. Its root gap is about `5 mm` on 196-frame test windows, so remaining
-error is dominated by local reconstruction quality rather than accumulated root
-drift.
+The full from-scratch R3 is the continuous-root quality reference. Its root gap
+is about `5 mm` on 196-frame test windows, showing that factorization solves the
+root drift mode. It is not the final token interface because its root latent is
+overcomplete.
 
 ### Root-FAST Full Tokenizer Eval
 
@@ -367,14 +375,12 @@ Known limitations:
 
 - The factorized experiments are currently M4Human-focused.
 - HumanML3D still needs a matching factorized cache and mixed-domain eval.
-- The root branch is continuous and currently overcomplete. For a 196-frame
-  clip, R3 uses a `98 x 256` continuous root latent, which is 32x larger than
-  the original `196 x 4` root-control signal. This is useful as a quality
-  reference, but not practical as the final upstream/downstream representation.
-- The current root branch reconstructs root controls from root controls plus
-  local condition. For generation, we still need to decide whether root controls
-  are predicted from text/sensor features, supplied as conditioning, or later
-  tokenized separately.
+- The R3 root branch is continuous and overcomplete. For a 196-frame clip, R3
+  uses a `98 x 256` continuous root latent, which is 32x larger than the
+  original `196 x 4` root-control signal. This is useful as a quality reference,
+  but not practical as the final upstream/downstream representation.
+- The Root-FAST RVQ token interface is M4Human-focused so far. It still needs to
+  be connected to the mmWave repository and evaluated as a prediction target.
 
 ## Recommended Next Steps
 

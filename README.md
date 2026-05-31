@@ -26,6 +26,33 @@
 
 </div>
 
+## Fork Status: M4Human Tokenizer Handoff
+
+This fork contains an M4Human motion-tokenizer exploration on top of the
+original MotionGPT codebase. The current stage conclusion is that the practical
+M4Human tokenizer should be factorized:
+
+```text
+local body pose:   local VQ tokens
+root trajectory:   Root-FAST RVQ tokens
+```
+
+Main handoff documents:
+
+- [PROJECT_STATUS.md](PROJECT_STATUS.md): current conclusion, recommended
+  checkpoints, and what is ready to merge with the mmWave repository.
+- [EXPERIMENT_INDEX.md](EXPERIMENT_INDEX.md): historical experiment map and
+  artifact locations under `/cpfs01/liangbo/data/MotionGPT`.
+- [MMWAVE_MERGE_PLAN.md](MMWAVE_MERGE_PLAN.md): token interface and integration
+  checklist for the future mmWave merge.
+- [FACTORIZED_TOKENIZER.md](FACTORIZED_TOKENIZER.md): architecture and training
+  details for the factorized tokenizer family.
+- [ROOT_LATENT_COMPRESSION.md](ROOT_LATENT_COMPRESSION.md) and
+  [ROOT_FAST_TOKENIZER_TODO.md](ROOT_FAST_TOKENIZER_TODO.md): root trajectory
+  compression results and remaining tokenizer choices.
+
+The original MotionGPT README continues below for upstream setup and usage.
+
 <!-- ### [MotionGPT: Human Motion as a Foreign Language](https://motion-gpt.github.io/) -->
 <!-- ### [Project Page](https://motion-gpt.github.io/) | [Arxiv Paper](https://arxiv.org/abs/2306.14795) | [HuggingFace Demo](xxx) -->
 
