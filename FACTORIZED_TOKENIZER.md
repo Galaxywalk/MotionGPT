@@ -36,10 +36,12 @@ Code:
 - `src/motiongpt_m4human/factorized/local_vq.py`
 - `src/motiongpt_m4human/factorized/root_branch.py`
 - `src/motiongpt_m4human/factorized/root_fast_codec.py`
+- `src/motiongpt_m4human/factorized/root_fast_quantize.py`
 - `src/motiongpt_m4human/factorized/cache.py`
 - `src/motiongpt_m4human/factorized/representation.py`
 - `scripts/train_factorized_scratch_m4human.sh`
 - `ROOT_LATENT_COMPRESSION.md`
+- `ROOT_FAST_TOKENIZER_TODO.md`
 
 ## Representation
 
@@ -358,6 +360,10 @@ Known limitations:
 2. Use the Root-FAST DCT codec as the next compact root interface. The
    no-training `chunk=16, K=4` setting uses only `208` continuous values for a
    196-frame clip and gives about `1.20 mm` root-codec MPJPE on M4Human test.
-3. Quantize Root-FAST DCT coefficients into root action tokens.
+3. Quantize Root-FAST DCT coefficients into root action tokens. Current
+   evidence says plain one-token-per-chunk VQ is too lossy, scalar quantization
+   preserves quality but uses many scalar codes, and product VQ is a useful but
+   still imperfect middle point. The next priority is Root-FAST RVQ over DCT
+   chunks.
 4. Only after compact root coefficients/tokens work, revisit HumanML3D
    mixed-domain training and downstream projector design.

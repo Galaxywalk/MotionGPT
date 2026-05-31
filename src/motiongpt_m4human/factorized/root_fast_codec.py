@@ -19,12 +19,12 @@ DEFAULT_OUT_DIR = "/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fa
 ROOT_CONTROL_DIM = 4
 
 
-def dct_reconstruct_root_controls(
+def dct_root_control_coefficients(
     root_controls: np.ndarray,
     chunk_size: int,
     coeff_count: int,
-) -> np.ndarray:
-    """Chunk root controls, keep low-frequency DCT coefficients, and reconstruct.
+) -> tuple[np.ndarray, int]:
+    """Return low-frequency DCT coefficients for chunked root controls.
 
     Args:
         root_controls: Array with shape [B, T, 4] in physical root-control
@@ -32,6 +32,10 @@ def dct_reconstruct_root_controls(
         chunk_size: Number of frames per DCT chunk.
         coeff_count: Number of low-frequency DCT coefficients to keep per
             chunk and root-control dimension.
+
+    Returns:
+        coeffs: Array with shape [B, chunks, coeff_count, 4].
+        frames: Original unpadded frame count.
     """
     if root_controls.ndim != 3 or root_controls.shape[-1] != ROOT_CONTROL_DIM:
         raise ValueError(f"Expected [B,T,{ROOT_CONTROL_DIM}], got {root_controls.shape}")
@@ -52,10 +56,49 @@ def dct_reconstruct_root_controls(
 
     chunked = padded.reshape(batch, chunks, chunk_size, dims)
     coeffs = dct(chunked, type=2, axis=2, norm="ortho")
-    coeffs[:, :, coeff_count:, :] = 0.0
-    recon = idct(coeffs, type=2, axis=2, norm="ortho")
-    recon = recon.reshape(batch, padded_frames, dims)[:, :frames, :]
-    return recon.astype(np.float32, copy=False)
+    return coeffs[:, :, :coeff_count, :].astype(np.float32, copy=False), frames
+
+
+def idct_root_control_coefficients(
+    coeffs: np.ndarray,
+    frames: int,
+    chunk_size: int,
+) -> np.ndarray:
+    """Reconstruct root controls from low-frequency DCT coefficients."""
+    if coeffs.ndim != 4 or coeffs.shape[-1] != ROOT_CONTROL_DIM:
+        raise ValueError(f"Expected [B,chunks,K,{ROOT_CONTROL_DIM}], got {coeffs.shape}")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if frames <= 0:
+        raise ValueError("frames must be positive")
+    coeff_count = int(coeffs.shape[2])
+    if coeff_count <= 0 or coeff_count > chunk_size:
+        raise ValueError("coeff_count must satisfy 0 < coeff_count <= chunk_size")
+
+    batch, chunks, _, dims = coeffs.shape
+    full_coeffs = np.zeros((batch, chunks, chunk_size, dims), dtype=np.float32)
+    full_coeffs[:, :, :coeff_count, :] = coeffs.astype(np.float32, copy=False)
+    recon = idct(full_coeffs, type=2, axis=2, norm="ortho")
+    padded_frames = chunks * chunk_size
+    return recon.reshape(batch, padded_frames, dims)[:, :frames, :].astype(np.float32, copy=False)
+
+
+def dct_reconstruct_root_controls(
+    root_controls: np.ndarray,
+    chunk_size: int,
+    coeff_count: int,
+) -> np.ndarray:
+    """Chunk root controls, keep low-frequency DCT coefficients, and reconstruct.
+
+    Args:
+        root_controls: Array with shape [B, T, 4] in physical root-control
+            units: yaw rad/s, local vx m/s, local vz m/s, root height m.
+        chunk_size: Number of frames per DCT chunk.
+        coeff_count: Number of low-frequency DCT coefficients to keep per
+            chunk and root-control dimension.
+    """
+    coeffs, frames = dct_root_control_coefficients(root_controls, chunk_size, coeff_count)
+    return idct_root_control_coefficients(coeffs, frames, chunk_size)
 
 
 def _flush_eval(

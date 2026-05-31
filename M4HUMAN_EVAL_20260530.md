@@ -900,3 +900,84 @@ Output paths:
 - The next step should be DCT coefficient quantization, especially k-means
   vector quantization over each chunk's flattened `K x 4` coefficients. With
   `chunk=16`, this would make a 196-frame clip about `13` root action tokens.
+
+## Root-FAST Quantization Sweep
+
+Code:
+
+```text
+src/motiongpt_m4human/factorized/root_fast_quantize.py
+```
+
+Output paths:
+
+```text
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_quantized_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_scalar_v1
+/cpfs01/liangbo/data/MotionGPT/factorized_experiments/root_fast_product_v1
+```
+
+The first full vector VQ sweep had a k-means early-stop bug and should be
+rerun. The bug is fixed in code. A small post-fix check still showed that
+one-token-per-chunk VQ is weak, so the main reliable completed results are
+scalar quantization and product VQ.
+
+### Scalar Quantization Test196
+
+| config | scalar codes | bits/window | MPJPE | root xz mean | final xz |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| chunk=16, K=2, 6-bit | 104 | 624 | 27.97 mm | 26.94 mm | 43.06 mm |
+| chunk=16, K=2, 8-bit | 104 | 832 | 9.94 mm | 9.48 mm | 11.98 mm |
+| chunk=32, K=4, 6-bit | 112 | 672 | 27.88 mm | 26.87 mm | 42.59 mm |
+| chunk=32, K=4, 8-bit | 112 | 896 | 9.36 mm | 8.91 mm | 12.32 mm |
+| chunk=64, K=4, 8-bit | 64 | 512 | 19.08 mm | 18.53 mm | 18.64 mm |
+
+Scalar quantization is not yet a clean motion-token interface, but it proves
+that DCT coefficients are discretizable. The issue is token packing, not the
+frequency representation itself.
+
+### Product VQ Test196
+
+Product VQ uses one code per root-command dimension per DCT chunk:
+
+```text
+chunk=16 -> 52 root tokens/window
+chunk=32 -> 28 root tokens/window
+chunk=64 -> 16 root tokens/window
+```
+
+Best completed results:
+
+| root tokens | chunk | K | vocab/group | bits/window | MPJPE | root xz mean | final xz |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 64 | 2 | 256 | 128 | 82.61 mm | 80.09 mm | 106.65 mm |
+| 28 | 32 | 2 | 256 | 224 | 53.67 mm | 51.57 mm | 80.14 mm |
+| 52 | 16 | 2 | 256 | 416 | 41.20 mm | 39.68 mm | 63.61 mm |
+
+This is much better than plain full-chunk vector VQ, but still far worse than
+continuous DCT coefficients or 8-bit scalar quantization.
+
+### Current Conclusion
+
+Root-FAST remains the most promising compact root representation. The next
+tokenizer should be RVQ over DCT chunks:
+
+```text
+chunk coefficients -> residual code_1, code_2, ..., code_R
+```
+
+For example:
+
+```text
+chunk=16, R=4 -> 13 chunks * 4 = 52 root tokens
+chunk=32, R=4 ->  7 chunks * 4 = 28 root tokens
+```
+
+This should preserve cross-dimension structure better than product VQ while
+using a practical number of tokens.
+
+Detailed next-step TODO:
+
+```text
+ROOT_FAST_TOKENIZER_TODO.md
+```
